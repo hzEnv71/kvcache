@@ -1,99 +1,157 @@
-
 # KVCache
 
-**本项目目前只在[知识星球](https://programmercarl.com/other/kstar.html)里维护，并答疑**
+一个基于 Go 实现的分布式缓存系统，支持：
 
-分布式缓存（Go）这个项目在 23年就在星球里发布了。
+- 本地缓存（LRU / LRU-2）
+- TTL 过期与淘汰
+- singleflight 并发防击穿
+- 一致性哈希路由（owner 路由）
+- gRPC 节点通信
+- etcd 服务注册与发现
 
-如今，对这个项目做了第二版优化。
+---
 
-对代码讲解，面试问题，和简历写法，都做了补充和完善。
+## 1. 项目特性
 
-本项目今天在[知识星球](https://programmercarl.com/other/kstar.html)里正式发布：
+- **缓存核心**：统一 `Cache` 封装，支持命中率统计
+- **多策略存储**：`store` 层支持 LRU、LRU-2
+- **并发保护**：同 key 并发 miss 请求合并
+- **分布式路由**：按 key 选择 owner 节点
+- **服务发现**：基于 etcd 动态感知节点上下线
+- **远程访问**：节点间通过 gRPC 执行 `Get/Set/Delete`
 
-![image](https://file1.kvcoder.com/i/web/20250414102441.png)
+---
 
-## 什么是缓存
+## 2. 目录结构
 
-缓存是将高频访问的数据暂存到内存中，是加速数据访问的存储，降低延迟，提高吞吐率的利器。
+```text
+.
+├── cache.go
+├── group.go
+├── peers.go
+├── server.go
+├── client.go
+├── consistenthash/
+├── store/
+├── singleflight/
+├── registry/
+├── pb/
+├── cmd/
+│   ├── server/
+│   └── client/
+└── scripts/
+```
 
-## 为什么要实现缓存系统
+---
 
-因缓存的使用相关需求，通过牺牲一部分服务器内存，减少对磁盘或者数据库资源进行直接读写，可换取更快响应速度。
+## 3. 运行环境
 
-尤其是处理高并发的场景，负责存储经常访问的数据，通过设计合理的缓存机制提高资源的访问效率。
+- Go 1.22+
+- etcd 3.5+
+- Windows / Linux / macOS
 
-由于服务器的内存是有限的，我们不能把所有数据都存放在内存中，因此需要一种机制来决定当使用内存超过一定标准时，应该删除哪些数据，这就涉及到缓存淘汰策略的选择。
+---
 
-## 在什么地方加缓存
+## 4. 快速开始
 
-距离用户越近，缓存能够发挥的效果越好。
+### 4.1 启动 etcd（本地）
 
-缓存的顺序：用户请求->HTTP缓存->CDN缓存->代理服务器缓存->进程内缓存->分布式缓存->数据库
+确保 etcd 可访问 `127.0.0.1:2379`。
 
-根据 缓存的存储方式 和 应用的耦合度，缓存可以分为 本地缓存（Local Cache） 和 分布式缓存（Distributed Cache）。
+### 4.2 启动 3 个缓存节点
 
-本地缓存更注重 访问速度，而分布式缓存则关注 数据一致性和扩展性。
+分别在 3 个终端执行：
 
-## 分布式缓存（Distributed Cache）
+```bash
+go run ./cmd/server --addr 127.0.0.1:8001 --svc kv-cache --group test --etcd 127.0.0.1:2379
+go run ./cmd/server --addr 127.0.0.1:8002 --svc kv-cache --group test --etcd 127.0.0.1:2379
+go run ./cmd/server --addr 127.0.0.1:8003 --svc kv-cache --group test --etcd 127.0.0.1:2379
+```
 
-分布式缓存是一种 独立部署的缓存服务，与应用进程分离，多个应用实例共享同一份缓存数据，典型实现包括 Redis、Memcached、etcd。
+### 4.3 客户端读写验证
 
-优势
+```bash
+go run ./cmd/client --op set --addr 127.0.0.1:8001 --group test --key k1 --value v1 --timeout 20s
+go run ./cmd/client --op get --addr 127.0.0.1:8002 --group test --key k1 --timeout 20s
+go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k1 --timeout 20s
+```
 
-1、支持大规模存储：
+### 4.4 脚本快速验证（PowerShell）
 
-  * 缓存数据分布在多个服务器上，不受单机内存限制，可扩展存储空间。
-  * 例如：Redis Cluster 支持横向扩展，通过分片技术存储 TB 级数据。
+```powershell
+.\scripts\test.ps1
+```
 
-2、数据一致性更高：
-  * 由于所有应用节点共享同一份缓存数据，不同服务器间的缓存一致性更容易保证。
-  * 例如：所有服务器都访问 Redis，数据变更时只需更新 Redis 即可同步到所有应用实例。
+---
 
-3、高可用性：
+## 5. 一致性与路由语义
 
-* Redis Sentinel 或 主从复制 方案可提供 缓存高可用性，即使某个缓存节点宕机，仍可快速切换到备用节点，避免单点故障。
-* 持久化机制（AOF/RDB） 使 Redis 在服务器重启后仍能恢复数据，保证缓存数据不会丢失。
+当前项目采用 **owner 路由语义**：
 
-4、适用于分布式系统：
-* 现代应用通常采用 多实例部署（如 Kubernetes 微服务架构），本地缓存难以满足数据共享需求，而 分布式缓存天然适用于多实例环境。
+- `Set/Delete`：必须路由到 key 的 owner 节点，同步执行，失败直接返回
+- `Get`：本地命中优先；miss 后按 owner 路由读取
 
+这能避免“写成功但跨节点读不到”的不一致问题。
 
-## 项目专栏精讲
+---
 
-该项目的专栏是[知识星球](https://programmercarl.com/other/kstar.html)录友专享的。
+## 6. 负载均衡说明
 
-项目专栏依然是将 「简历写法」给大家列出来了，大家学完就可以参考这个来写简历：
+### 6.1 项目内负载策略
 
-![image](https://file1.kvcoder.com/i/web/20250414101516.png)
+- 支持一致性哈希与权重副本（replicas）
+- 默认关闭“每节点本地自动重平衡”，避免多节点 ring 视图不一致
 
-做完该项目，面试中大概率会有哪些面试问题，以及如何回答，也列出好了：
+### 6.2 生产建议
 
-![image](https://file1.kvcoder.com/i/web/20250414101617.png)
+入口流量建议交给外部负载均衡（如 Nginx / Envoy / 云 LB），
+KVCache 内部负责数据分片路由与缓存逻辑。
 
-专栏中的项目面试题都掌握的话，这个项目在面试中基本没问题。
+---
 
-项目架构：
+## 7. 常用参数
 
-![image](https://file1.kvcoder.com/i/web/20250414101706.png)
+### `cmd/server`
 
-本项目主要模块：缓存组、缓存淘汰与实现、缓存并发、分布式算法之一致性哈希、缓存对外服务化 都做了详细的讲解：
+- `--addr`：当前节点地址（如 `127.0.0.1:8001`）
+- `--svc`：etcd 注册服务名（默认 `kv-cache`）
+- `--group`：缓存组名（默认 `test`）
+- `--cache-bytes`：缓存容量（字节）
+- `--expiration`：默认 TTL（如 `30s`）
+- `--etcd`：etcd 地址，支持逗号分隔
+- `--weights`：静态权重（`addr=replicas,...`）
+- `--dynamic-ring`：是否启用动态 ring 配置监听（预留）
+- `--publish-ring`：启动时发布 ring 配置（预留）
 
-![image](https://file1.kvcoder.com/i/web/20250414101827.png)
+### `cmd/client`
 
-![image](https://file1.kvcoder.com/i/web/20250414101856.png)
+- `--op`：`get | set | delete`
+- `--addr`：目标节点地址
+- `--group`：组名
+- `--key`：缓存 key
+- `--value`：写入值（set 必填）
+- `--timeout`：请求超时（建议 `10s~20s`）
 
-![image](https://file1.kvcoder.com/i/web/20250414101913.png)
+---
 
-![image](https://file1.kvcoder.com/i/web/20250414101930.png)
+## 8. 开发与测试
 
+```bash
+go mod tidy
+go test ./cmd/...
+```
 
-## 获取本项目专栏
+说明：`store` 下部分测试用例可能与当前实现策略不一致，建议先以命令入口与集成链路验证为主。
 
-**本文档仅为星球内部专享，大家可以加入[知识星球](https://programmercarl.com/other/kstar.html)里获取，在星球置顶一**
+---
 
+## 9. 文档
 
-## 许可证
+- 学习文档：`study.md`
+- 主要工作说明：`mainwork.md`
 
-MIT License
+---
 
+## 10. License
+
+MIT
