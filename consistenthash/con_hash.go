@@ -175,6 +175,26 @@ func (m *Map) Get(key string) string {
 	return node
 }
 
+// DumpNodes 返回当前哈希环中的真实节点列表（去重、排序）。
+func (m *Map) DumpNodes() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	for _, node := range m.hashMap {//遍历hashMap 将节点加入seen
+		seen[node] = struct{}{}
+	}
+
+	nodes := make([]string, 0, len(seen))
+	for node := range seen {//遍历seen 将节点加入nodes
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+	return nodes
+}
+
+
+
 
 
 
@@ -249,6 +269,8 @@ func (m *Map) rebalanceNodes() {
 	// 重新排序
 	sort.Ints(m.keys)
 }
+
+
 
 // GetStats 获取负载统计信息
 func (m *Map) GetStats() map[string]float64 {

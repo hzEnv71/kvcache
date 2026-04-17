@@ -137,39 +137,87 @@ func GetGroup(name string) *Group {
 	return groups[name]
 }
 
-// Get 从缓存获取数据
+// Get 从缓存获取数据。
+//
+// 严格 owner-only：
+// - 先通过一致性哈希找到 owner；
+// - owner 是远端：直接去 owner 读，不查当前节点本地缓存；
+// - owner 是本机：先查本地缓存，miss 后再回源 getter 并回填本地缓存。
+//
+// 详细执行流程：
+// 1. 检查 group 是否已关闭；关闭则直接返回错误。
+// 2. 检查 key 是否为空；为空则直接返回错误。
+// 3. 如果还没启用 peers（单机模式）：
+//    - 先查本地缓存；
+//    - 命中则直接返回；
+//    - miss 则调用 g.load(ctx, key) 回源。
+// 4. 如果启用了 peers：
+//    - 先通过一致性哈希 PickPeer(key) 找 owner；
+//    - 如果 owner 是远端：直接调用 g.getFromPeer 去远端取；
+//    - 如果 owner 是本机：先查本地缓存，miss 后调用 g.load 回源。
+// 5. 整个过程中会统计 localHits/localMisses/peerHits/peerMisses。
 func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
-	// 检查组是否已关闭
 	if atomic.LoadInt32(&g.closed) == 1 {
 		return ByteView{}, ErrGroupClosed
 	}
-
 	if key == "" {
 		return ByteView{}, ErrKeyRequired
 	}
 
-	// 从本地缓存获取
+	if g.peers == nil {
+		view, ok := g.mainCache.Get(ctx, key)
+		if ok {
+			atomic.AddInt64(&g.stats.localHits, 1)
+			return view, nil
+		}
+		atomic.AddInt64(&g.stats.localMisses, 1)
+		return g.load(ctx, key) // 单机模式下：本地 miss 后直接回源 getter。
+	}
+
+	peer, ok, isSelf := g.peers.PickPeer(key)
+	if picker, ok2 := g.peers.(*ClientPicker); ok2 {
+		picker.PrintRingState(key)
+	}
+	if !ok {
+		return ByteView{}, fmt.Errorf("owner peer unavailable for key=%s", key) // 没有可用 owner，直接返回错误。
+	}
+
+	if !isSelf {
+		value, err := g.getFromPeer(ctx, peer, key)
+		if err != nil {
+			atomic.AddInt64(&g.stats.peerMisses, 1)
+			return ByteView{}, err // 远端 owner 读取失败，直接把错误返回给上层。
+		}
+		atomic.AddInt64(&g.stats.peerHits, 1)
+		return value, nil // 远端 owner 成功返回，当前节点不再做本地兜底。
+	}
+
 	view, ok := g.mainCache.Get(ctx, key)
 	if ok {
 		atomic.AddInt64(&g.stats.localHits, 1)
-		return view, nil
+		return view, nil // owner 是本机且本地命中，直接返回。
 	}
 
 	atomic.AddInt64(&g.stats.localMisses, 1)
-
-	// 尝试从其他节点获取或加载
-	return g.load(ctx, key)
+	return g.load(ctx, key) // owner 是本机但本地 miss，回源 getter。
 }
 
 // Set 设置缓存值。
 //
-// 当前语义：
-// 1) 先写本地缓存；
-// 2) 若请求不是来自 peer 转发，则异步向 owner 节点同步写（尽力同步）。
-//
-// 注意：这是“最终一致”写路径，返回成功并不代表远端已完成同步。
+// 详细执行流程：
+// 1. 检查 group 是否已关闭；关闭则直接返回错误。
+// 2. 检查 key/value 是否有效；无效则直接返回错误。
+// 3. 如果请求是 peer 转发来的（metadata 中有 from_peer=true）：
+//    - 说明这已经是 owner 节点收到的二次请求；
+//    - 直接在当前节点本地缓存写入，不再继续路由。
+// 4. 如果还没启用 peers（单机模式）：
+//    - 直接在本地缓存写入。
+// 5. 如果启用了 peers：
+//    - 先通过一致性哈希找到 owner；
+//    - 如果 owner 是远端：用 g.peers 返回的 client 直接转发到 owner；
+//    - 如果 owner 是本机：直接写当前节点本地缓存。
+// 6. 整个过程中不会在非 owner 节点留下业务数据副本。
 func (g *Group) Set(ctx context.Context, key string, value []byte) error {
-	// 基础状态与参数校验
 	if atomic.LoadInt32(&g.closed) == 1 {
 		return ErrGroupClosed
 	}
@@ -180,32 +228,66 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 		return ErrValueRequired
 	}
 
-	// 标记来源：若来自 peer，同步逻辑不再继续转发，避免环路
-	isPeerRequest := isFromPeer(ctx)
+	if isFromPeer(ctx) {
+		view := ByteView{b: cloneBytes(value)}
+		if g.expiration > 0 {
+			g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
+		} else {
+			g.mainCache.Add(key, view)
+		}
+		return nil // peer 转发请求已经到达 owner，本地直接写入即可。
+	}
 
-	// 本地写入缓存（写路径优先保证本机可读）
+	if g.peers == nil {
+		view := ByteView{b: cloneBytes(value)}
+		if g.expiration > 0 {
+			g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
+		} else {
+			g.mainCache.Add(key, view)
+		}
+		return nil // 单机模式下：没有 peers，就直接本地写入。
+	}
+
+	peer, ok, isSelf := g.peers.PickPeer(key)
+	if picker, ok2 := g.peers.(*ClientPicker); ok2 {
+		picker.PrintRingState(key)
+	}
+	if !ok {
+		return fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接报错。
+	}
+
+	if !isSelf { // 本节点不是 owner，直接转发给 owner，不在本地落副本。
+		syncCtx := peerContext(context.Background())
+		if err := peer.Set(syncCtx, g.name, key, value); err != nil {
+			return fmt.Errorf("failed to set to owner peer: %w", err) // 远端写失败，原样返回错误。
+		}
+		return nil // 远端 owner 写成功，当前节点结束。
+	}
+
 	view := ByteView{b: cloneBytes(value)}
 	if g.expiration > 0 {
 		g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
 	} else {
 		g.mainCache.Add(key, view)
 	}
-
-	// 非 peer 请求时，异步同步到 owner 节点（不阻塞当前请求）
-	if !isPeerRequest && g.peers != nil {
-		go g.syncToPeers(ctx, "set", key, value)
-	}
-
-	return nil
+	return nil // owner 是本机，直接写本地缓存。
 }
 
 // Delete 删除缓存值。
 //
-// 严格 owner-only：
-// - 必须先路由到 owner；
-// - owner 是远端：直接删远端；
-// - owner 是本机：删本地缓存；
-// - peer 转发请求：只做本地删，不再继续路由。
+// 详细执行流程：
+// 1. 检查 group 是否已关闭；关闭则直接返回错误。
+// 2. 检查 key 是否为空；为空则直接返回错误。
+// 3. 如果请求是 peer 转发来的（metadata 中有 from_peer=true）：
+//    - 说明这已经是 owner 节点收到的二次请求；
+//    - 直接在当前节点本地删除，不再继续路由。
+// 4. 如果还没启用 peers（单机模式）：
+//    - 直接在本地缓存删除。
+// 5. 如果启用了 peers：
+//    - 先通过一致性哈希找到 owner；
+//    - 如果 owner 是远端：用 g.peers 返回的 client 直接转发到 owner；
+//    - 如果 owner 是本机：直接删当前节点本地缓存。
+// 6. 整个过程中不会尝试同时删多份副本，因为当前模型是严格 owner-only。
 func (g *Group) Delete(ctx context.Context, key string) error {
 	if atomic.LoadInt32(&g.closed) == 1 {
 		return ErrGroupClosed
@@ -216,29 +298,32 @@ func (g *Group) Delete(ctx context.Context, key string) error {
 
 	if isFromPeer(ctx) {
 		g.mainCache.Delete(key)
-		return nil
+		return nil // peer 转发请求已经到达 owner，本地直接删除即可。
 	}
 
 	if g.peers == nil {
 		g.mainCache.Delete(key)
-		return nil
+		return nil // 单机模式下：没有 peers，就直接本地删除。
 	}
 
 	peer, ok, isSelf := g.peers.PickPeer(key)
+	if picker, ok2 := g.peers.(*ClientPicker); ok2 {
+		picker.PrintRingState(key)
+	}
 	if !ok {
-		return fmt.Errorf("owner peer unavailable for key=%s", key)
+		return fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接报错。
 	}
 
-	if !isSelf {
+	if !isSelf { // 本节点不是 owner，直接转发给 owner，不在本地做删除副本。
 		syncCtx := peerContext(context.Background())
 		if _, err := peer.Delete(syncCtx, g.name, key); err != nil {
-			return fmt.Errorf("failed to delete from owner peer: %w", err)
+			return fmt.Errorf("failed to delete from owner peer: %w", err) // 远端删除失败，原样返回。
 		}
-		return nil
+		return nil // 远端 owner 删除成功，当前节点结束。
 	}
 
 	g.mainCache.Delete(key)
-	return nil
+	return nil // owner 是本机，直接删除本地缓存。
 }
 
 // syncToPeers 旧的异步同步路径已不再作为主流程使用。
@@ -253,7 +338,7 @@ func (g *Group) syncToPeers(ctx context.Context, op string, key string, value []
 		return
 	}
 
-	syncCtx := peerContext(context.Background())//设置from_peer=true
+	syncCtx := peerContext(context.Background())
 
 	var err error
 	switch op {
@@ -332,22 +417,8 @@ func (g *Group) load(ctx context.Context, key string) (value ByteView, err error
 
 // loadData 实际加载数据的方法
 func (g *Group) loadData(ctx context.Context, key string) (value ByteView, err error) {
-	// 尝试从远程节点获取
-	if g.peers != nil {
-		peer, ok, isSelf := g.peers.PickPeer(key)
-		if ok && !isSelf {
-			value, err := g.getFromPeer(ctx, peer, key)
-			if err == nil {
-				atomic.AddInt64(&g.stats.peerHits, 1)
-				return value, nil
-			}
-
-			atomic.AddInt64(&g.stats.peerMisses, 1)
-			logrus.Warnf("[KVCache] failed to get from peer: %v", err)
-		}
-	}
-
-	// 从数据源加载
+	// owner-only 模式下：这里不再尝试转发到其他 peer
+	// 只允许走本地 getter 回源
 	bytes, err := g.getter.Get(ctx, key) //目前是做空处理 打印找不到日志 后面可以扩展成从数据库中获取
 	if err != nil {
 		return ByteView{}, fmt.Errorf("failed to get data: %w", err)

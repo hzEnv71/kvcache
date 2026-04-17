@@ -18,7 +18,7 @@ type Config struct {
 
 // DefaultConfig 默认配置
 var DefaultConfig = &Config{
-	DefaultReplicas:      50,
+	DefaultReplicas:      10,
 	MinReplicas:          10,
 	MaxReplicas:          200,
 	HashFunc:             crc32.ChecksumIEEE,

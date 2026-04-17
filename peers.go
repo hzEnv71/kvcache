@@ -3,7 +3,6 @@ package kvcache
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -69,10 +68,28 @@ func (p *ClientPicker) PrintPeers() {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	log.Printf("当前已发现的节点:")
+	logrus.Printf("当前已发现的节点:")
 	for addr := range p.clients {
-		log.Printf("- %s", addr)
+		logrus.Printf("- %s", addr)
 	}
+}
+
+// PrintRingState 打印当前哈希环状态（仅用于调试）
+func (p *ClientPicker) PrintRingState(key string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	logrus.Printf("[ring] self=%s svc=%s key=%s", p.selfAddr, p.svcName, key)
+	logrus.Printf("[ring] ring nodes:")
+	for _, node := range p.consHash.DumpNodes() {
+		logrus.Printf("  - %s", node)
+	}
+	logrus.Printf("[ring] clients:")
+	for addr := range p.clients {
+		logrus.Printf("  - %s", addr)
+	}
+	owner := p.consHash.Get(key)
+	logrus.Printf("[ring] owner=%s", owner)
 }
 
 // NewClientPicker 创建新的ClientPicker实例
@@ -140,9 +157,12 @@ func (p *ClientPicker) fetchAllServices() error {
 
 	for _, kv := range resp.Kvs {
 		addr := string(kv.Value)
-		if addr != "" && addr != p.selfAddr {
-			p.set(addr)
-			logrus.Infof("Discovered service at %s", addr)
+		if addr != "" {
+			p.addMember(addr)
+			if addr != p.selfAddr {
+				p.ensureClient(addr)
+				logrus.Infof("Discovered service at %s", addr)
+			}
 		}
 	}
 	return nil
@@ -189,19 +209,21 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 
 	for _, event := range events {
 		addr := string(event.Kv.Value)
-		if addr == p.selfAddr {
+		if addr == "" {
 			continue
 		}
 
 		switch event.Type {
 		case clientv3.EventTypePut: //新增节点
-			if _, exists := p.clients[addr]; !exists { //如果节点不存在 则创建连接 并加入哈希环和clients映射
-				p.set(addr)
+			p.addMember(addr)
+			if addr != p.selfAddr {
+				p.ensureClient(addr)
 				logrus.Infof("New service discovered at %s", addr)
 			}
 		case clientv3.EventTypeDelete: //删除节点
-			if client, exists := p.clients[addr]; exists { //如果节点存在 则关闭连接 并从哈希环和clients映射中移除
-				p.remove(addr)
+			p.removeMember(addr)
+			if client, exists := p.clients[addr]; exists && addr != p.selfAddr { //如果节点存在 则关闭连接 并从哈希环和clients映射中移除
+				delete(p.clients, addr)
 				client.Close()
 				logrus.Infof("Service removed at %s", addr)
 			}
@@ -209,16 +231,19 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 	}
 }
 
-// set 添加服务实例。
-//
-// 执行顺序：
-// 1) 先创建远端 client 连接；
-// 2) 成功后把节点加入哈希环与 clients 映射。
-//
-// 这样可以避免“环里有节点但连接不可用”的路由空洞。
-func (p *ClientPicker) set(addr string) {
+// addMember 将节点加入哈希环
+func (p *ClientPicker) addMember(addr string) {
+	if err := p.consHash.Add(addr); err != nil {
+		logrus.Errorf("Failed to add member %s to hash ring: %v", addr, err)
+	}
+}
+
+// ensureClient 为远端节点创建连接并缓存
+func (p *ClientPicker) ensureClient(addr string) {
+	if _, exists := p.clients[addr]; exists {
+		return
+	}
 	if client, err := NewClient(addr, p.svcName, p.etcdCli); err == nil {
-		p.consHash.Add(addr)
 		p.clients[addr] = client
 		logrus.Infof("Successfully created client for %s", addr)
 	} else {
@@ -226,10 +251,11 @@ func (p *ClientPicker) set(addr string) {
 	}
 }
 
-// remove 移除服务实例
-func (p *ClientPicker) remove(addr string) {
-	p.consHash.Remove(addr)
-	delete(p.clients, addr)
+// removeMember 从哈希环移除节点
+func (p *ClientPicker) removeMember(addr string) {
+	if err := p.consHash.Remove(addr); err != nil {
+		logrus.Errorf("Failed to remove member %s from hash ring: %v", addr, err)
+	}
 }
 
 // PickPeer 根据 key 选择 owner 节点。
@@ -248,9 +274,13 @@ func (p *ClientPicker) PickPeer(key string) (Peer, bool, bool) {
 	defer p.mu.RUnlock()
 
 	if addr := p.consHash.Get(key); addr != "" {
+		isSelf := addr == p.selfAddr
+		logrus.Infof("key=%s owner=%s self=%v", key, addr, isSelf)
+		if isSelf {
+			return nil, true, true
+		}
 		if client, ok := p.clients[addr]; ok {
-			logrus.Infof("key=%s owner=%s self=%v", key, addr, addr == p.selfAddr)
-			return client, true, addr == p.selfAddr
+			return client, true, false
 		}
 	}
 	return nil, false, false

@@ -71,6 +71,7 @@ func (c *Client) Get(group, key string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	ctx = withPeerMetadata(ctx)
 	resp, err := c.grpcCli.Get(ctx, &pb.Request{
 		Group: group,
 		Key:   key,

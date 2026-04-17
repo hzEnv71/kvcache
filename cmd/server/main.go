@@ -60,6 +60,15 @@ func main() {
 	group.RegisterPeers(picker) //注册节点选择器到缓存组
 
 	fmt.Printf("server starting addr=%s svc=%s group=%s etcd=%v\n", *addr, *svc, *groupName, etcdEndpoints)
+	// 延迟打印 ring，方便观察服务发现是否收敛
+	go func() {
+		time.Sleep(3 * time.Second)
+		picker.PrintPeers()
+		picker.PrintRingState("k1")
+		time.Sleep(10 * time.Second)
+		picker.PrintPeers()
+		picker.PrintRingState("k1")
+	}()
 	//异步启动服务器
 	go func() {
 		if err := srv.Start(); err != nil {
