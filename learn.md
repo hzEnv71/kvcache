@@ -305,13 +305,14 @@ client -> server.go:Set -> group.go:Set
 
 `group.Set` 当前的语义是：
 
-1. 判断是否来自 peer 转发（`from_peer`）
-2. 先写本地缓存
-3. 如果不是 peer 请求且启用了 peers：异步 `syncToPeers(...)`
+1. 判断是否来自 peer 转发（通过 gRPC metadata 中的 `from_peer=true`）
+2. 先按 owner 路由
+3. owner 是远端：把 `from_peer=true` 继续通过 metadata 传给远端
+4. owner 是本机：直接写本地缓存
 
 所以它是：
 
-> **先本地写，再尽力同步到 owner（最终一致）**
+> **先路由到 owner，再由 owner 完成写入**
 
 ---
 
@@ -319,26 +320,29 @@ client -> server.go:Set -> group.go:Set
 
 `Delete` 与 `Set` 类似：
 
-1. 先删本地
-2. 如果不是 peer 请求且启用了 peers：异步同步删除给 owner
+1. 先判断是否为 peer 转发请求（通过 gRPC metadata）
+2. 再按 owner 路由到目标节点
+3. owner 是远端：把 `from_peer=true` 继续传给远端
+4. owner 是本机：直接删本地缓存
 
 ---
 
 ### 5.3 `syncToPeers(...)` 做了什么
 
 ```text
-group.go:syncToPeers
+group.go:Set/Delete
    │
-   ├─ peers.PickPeer(key)
-   ├─ 如果 owner 是本机：直接返回
-   ├─ 构造 syncCtx(from_peer=true)
-   └─ peer.Set / peer.Delete
+   ├─ if metadata 中已有 from_peer=true -> 只做本地处理
+   ├─ 否则调用 peers.PickPeer(key)
+   ├─ owner 是远端 -> 通过 client.go 发起 gRPC 调用
+   └─ client.go 会把 from_peer=true 写入 outgoing metadata
 ```
 
 这里的关键是 `from_peer=true`：
 
+- 通过 gRPC metadata 在节点间传递
 - 避免远端收到后再次同步，形成循环
-- peer 请求只做本地落盘
+- peer 请求只做本地处理
 
 ---
 
@@ -619,7 +623,7 @@ consistenthash.Map.Get(key)
 
 ## 11. 你可以用这一段话串起来讲整个项目
 
-> KVCache 的整体链路是：客户端请求先到 gRPC server，server 转给 group 层处理；group 先查本地 cache，miss 后通过 singleflight 合并并发，再通过一致性哈希找到 owner 节点；如果 owner 是远端，就用 peers 维护的 gRPC client 发起远程调用；如果 owner 是本机，就回源 getter；节点信息由 etcd 注册和 watch 维护，底层缓存由 store 提供 LRU/LRU-2 淘汰能力。
+> KVCache 的整体链路是：客户端请求先到 gRPC server，server 转给 group 层处理；group 先通过一致性哈希找到 owner 节点；如果 owner 是远端，就用 peers 维护的 gRPC client 发起远程调用，并通过 gRPC metadata 传递 `from_peer=true`；如果 owner 是本机，就在本地缓存中读写；节点信息由 etcd 注册和 watch 维护，底层缓存由 store 提供 LRU/LRU-2 淘汰能力。
 
 ---
 

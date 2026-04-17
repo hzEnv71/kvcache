@@ -9,14 +9,13 @@ import (
 	"time"
 
 	"KVCache/consistenthash"
-	"KVCache/etcd"
+	registry "KVCache/etcd"
 
 	"github.com/sirupsen/logrus"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 const defaultSvcName = "kv-cache"
-
 
 // Peer 定义了缓存节点的接口 //client.go实现该接口
 type Peer interface {
@@ -26,14 +25,11 @@ type Peer interface {
 	Close() error
 }
 
-
 // PeerPicker 定义了peer选择器的接口
 type PeerPicker interface {
 	PickPeer(key string) (peer Peer, ok bool, self bool)
 	Close() error
 }
-
-
 
 // ClientPicker 实现 PeerPicker，负责“服务发现 + 路由选择 + 连接管理”。
 //
@@ -158,14 +154,23 @@ func (p *ClientPicker) fetchAllServices() error {
 // 生命周期由 p.ctx 控制，Close 后会退出协程。
 func (p *ClientPicker) watchServiceChanges() {
 	watcher := clientv3.NewWatcher(p.etcdCli)
+	defer watcher.Close()
 	watchChan := watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix())
-
 	for {
 		select {
-		case <-p.ctx.Done(): //监听ctx结束
-			watcher.Close()
+		case <-p.ctx.Done():
 			return
-		case resp := <-watchChan: //监听watchChan
+		case resp, ok := <-watchChan:
+			if !ok {
+				time.Sleep(time.Second)
+				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix())
+				continue
+			}
+			if resp.Err() != nil {
+				time.Sleep(time.Second)
+				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix())
+				continue
+			}
 			p.handleWatchEvents(resp.Events)
 		}
 	}
@@ -190,12 +195,12 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 
 		switch event.Type {
 		case clientv3.EventTypePut: //新增节点
-			if _, exists := p.clients[addr]; !exists {//如果节点不存在 则创建连接 并加入哈希环和clients映射
+			if _, exists := p.clients[addr]; !exists { //如果节点不存在 则创建连接 并加入哈希环和clients映射
 				p.set(addr)
 				logrus.Infof("New service discovered at %s", addr)
 			}
 		case clientv3.EventTypeDelete: //删除节点
-			if client, exists := p.clients[addr]; exists {//如果节点存在 则关闭连接 并从哈希环和clients映射中移除
+			if client, exists := p.clients[addr]; exists { //如果节点存在 则关闭连接 并从哈希环和clients映射中移除
 				p.remove(addr)
 				client.Close()
 				logrus.Infof("Service removed at %s", addr)
@@ -244,6 +249,7 @@ func (p *ClientPicker) PickPeer(key string) (Peer, bool, bool) {
 
 	if addr := p.consHash.Get(key); addr != "" {
 		if client, ok := p.clients[addr]; ok {
+			logrus.Infof("key=%s owner=%s self=%v", key, addr, addr == p.selfAddr)
 			return client, true, addr == p.selfAddr
 		}
 	}

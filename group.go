@@ -181,7 +181,7 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 	}
 
 	// 标记来源：若来自 peer，同步逻辑不再继续转发，避免环路
-	isPeerRequest := ctx.Value("from_peer") != nil
+	isPeerRequest := isFromPeer(ctx)
 
 	// 本地写入缓存（写路径优先保证本机可读）
 	view := ByteView{b: cloneBytes(value)}
@@ -201,10 +201,11 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 
 // Delete 删除缓存值。
 //
-// 当前语义与 Set 对齐：
-// - 先删本地；
-// - 非 peer 请求异步同步删除到 owner；
-// - peer 请求仅本地执行，避免循环删除。
+// 严格 owner-only：
+// - 必须先路由到 owner；
+// - owner 是远端：直接删远端；
+// - owner 是本机：删本地缓存；
+// - peer 转发请求：只做本地删，不再继续路由。
 func (g *Group) Delete(ctx context.Context, key string) error {
 	if atomic.LoadInt32(&g.closed) == 1 {
 		return ErrGroupClosed
@@ -213,41 +214,53 @@ func (g *Group) Delete(ctx context.Context, key string) error {
 		return ErrKeyRequired
 	}
 
-	// 本地先删，保证本节点读路径立即生效
-	g.mainCache.Delete(key)
-
-	isPeerRequest := ctx.Value("from_peer") != nil
-	if !isPeerRequest && g.peers != nil {
-		go g.syncToPeers(ctx, "delete", key, nil)
+	if isFromPeer(ctx) {
+		g.mainCache.Delete(key)
+		return nil
 	}
 
+	if g.peers == nil {
+		g.mainCache.Delete(key)
+		return nil
+	}
+
+	peer, ok, isSelf := g.peers.PickPeer(key)
+	if !ok {
+		return fmt.Errorf("owner peer unavailable for key=%s", key)
+	}
+
+	if !isSelf {
+		syncCtx := peerContext(context.Background())
+		if _, err := peer.Delete(syncCtx, g.name, key); err != nil {
+			return fmt.Errorf("failed to delete from owner peer: %w", err)
+		}
+		return nil
+	}
+
+	g.mainCache.Delete(key)
 	return nil
 }
 
-// syncToPeers 将变更同步到 owner 节点（尽力同步）。
-//
-// 关键点：
-// - 只同步到 PickPeer 选出的目标节点，不做广播；
-// - 通过 from_peer 标记避免对方再次触发同步形成环路；
-// - 失败仅记录日志，不影响当前请求返回（异步语义）。
+// syncToPeers 旧的异步同步路径已不再作为主流程使用。
+// 当前 Set/Delete 直接路由 owner，因此这里保留为兼容占位。
 func (g *Group) syncToPeers(ctx context.Context, op string, key string, value []byte) {
 	if g.peers == nil {
 		return
 	}
 
-	peer, ok, isSelf := g.peers.PickPeer(key) //选出owner节点
-	if !ok || isSelf {                        //如果选出owner节点失败或者owner节点是自己 则返回
+	peer, ok, isSelf := g.peers.PickPeer(key)
+	if !ok || isSelf {
 		return
 	}
 
-	syncCtx := context.WithValue(context.Background(), "from_peer", true) //设置from_peer标记
+	syncCtx := peerContext(context.Background())//设置from_peer=true
 
 	var err error
 	switch op {
 	case "set":
-		err = peer.Set(syncCtx, g.name, key, value) //调用client.go set
+		err = peer.Set(syncCtx, g.name, key, value)
 	case "delete":
-		_, err = peer.Delete(syncCtx, g.name, key) //调用client.go delete
+		_, err = peer.Delete(syncCtx, g.name, key)
 	}
 
 	if err != nil {

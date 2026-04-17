@@ -164,8 +164,8 @@ func (s *Server) Start() error {
 // Stop 停止服务器
 func (s *Server) Stop() {
 	close(s.stopCh)
-	s.grpcServer.GracefulStop()//优雅停止gRPC服务器
-	if s.etcdCli != nil {//关闭etcd客户端
+	s.grpcServer.GracefulStop() //优雅停止gRPC服务器
+	if s.etcdCli != nil {       //关闭etcd客户端
 		s.etcdCli.Close()
 	}
 }
