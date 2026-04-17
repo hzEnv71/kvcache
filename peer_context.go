@@ -6,6 +6,7 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// 负责grpc传递元数据
 const peerMetaKey = "from_peer"
 
 // 把 from_peer=true 写进 gRPC outgoing metadata
