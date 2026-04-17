@@ -81,7 +81,7 @@ func (c *Client) Get(group, key string) ([]byte, error) {
 	return resp.GetValue(), nil
 }
 
-func (c *Client) Delete(group, key string) (bool, error) {
+func (c *Client) Delete(ctx context.Context, group, key string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 

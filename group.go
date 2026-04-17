@@ -48,14 +48,14 @@ func (f GetterFunc) Get(ctx context.Context, key string) ([]byte, error) {
 // 3) 在 miss 场景下通过 singleflight 合并并发加载；
 // 4) 记录统计信息，便于观察命中率与加载开销。
 type Group struct {
-	name       string // 组名
-	getter     Getter // 数据源回调
-	mainCache  *Cache // 本地缓存
-	peers      PeerPicker // 分布式节点选择器
+	name       string              // 组名
+	getter     Getter              // 数据源回调
+	mainCache  *Cache              // 本地缓存
+	peers      PeerPicker          // 分布式节点选择器
 	loader     *singleflight.Group // 并发加载器
-	expiration time.Duration // 缓存过期时间，0表示永不过期
-	closed     int32         // 原子变量，标记组是否已关闭
-	stats      groupStats    // 统计信息
+	expiration time.Duration       // 缓存过期时间，0表示永不过期
+	closed     int32               // 原子变量，标记组是否已关闭
+	stats      groupStats          // 统计信息
 }
 
 // groupStats 保存组的统计信息
@@ -235,19 +235,19 @@ func (g *Group) syncToPeers(ctx context.Context, op string, key string, value []
 		return
 	}
 
-	peer, ok, isSelf := g.peers.PickPeer(key)
-	if !ok || isSelf {
+	peer, ok, isSelf := g.peers.PickPeer(key) //选出owner节点
+	if !ok || isSelf {                        //如果选出owner节点失败或者owner节点是自己 则返回
 		return
 	}
 
-	syncCtx := context.WithValue(context.Background(), "from_peer", true)//设置from_peer标记
+	syncCtx := context.WithValue(context.Background(), "from_peer", true) //设置from_peer标记
 
 	var err error
 	switch op {
 	case "set":
-		err = peer.Set(syncCtx, g.name, key, value)
+		err = peer.Set(syncCtx, g.name, key, value) //调用client.go set
 	case "delete":
-		_, err = peer.Delete(g.name, key)
+		_, err = peer.Delete(syncCtx, g.name, key) //调用client.go delete
 	}
 
 	if err != nil {
@@ -335,7 +335,7 @@ func (g *Group) loadData(ctx context.Context, key string) (value ByteView, err e
 	}
 
 	// 从数据源加载
-	bytes, err := g.getter.Get(ctx, key)//目前是做空处理 打印找不到日志 后面可以扩展成从数据库中获取
+	bytes, err := g.getter.Get(ctx, key) //目前是做空处理 打印找不到日志 后面可以扩展成从数据库中获取
 	if err != nil {
 		return ByteView{}, fmt.Errorf("failed to get data: %w", err)
 	}

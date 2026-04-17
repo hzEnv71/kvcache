@@ -22,7 +22,7 @@ const defaultSvcName = "kv-cache"
 type Peer interface {
 	Get(group string, key string) ([]byte, error)
 	Set(ctx context.Context, group string, key string, value []byte) error
-	Delete(group string, key string) (bool, error)
+	Delete(ctx context.Context, group string, key string) (bool, error)
 	Close() error
 }
 
