@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/youngyangyang04/KVCache-Go/store"
+	"KVCache/store"
 
 	"github.com/sirupsen/logrus"
 )

@@ -22,24 +22,44 @@
 
 ---
 
-## 2. 目录结构
+## 2. 目录结构（含功能说明）
 
 ```text
 .
-├── cache.go
-├── group.go
-├── peers.go
-├── server.go
-├── client.go
+├── byteview.go                 # 缓存值只读视图封装（避免外部直接改底层字节）
+├── utils.go                    # 通用工具函数（如字节拷贝）
+├── cache.go                    # 本地缓存统一封装：初始化、读写、TTL、命中统计
+├── group.go                    # 核心业务入口：Get/Set/Delete、singleflight、owner 路由
+├── peers.go                    # 节点选择与服务发现：维护成员、client 连接、PickPeer
+├── client.go                   # 节点间 gRPC 客户端实现（Peer 接口实现）
+├── server.go                   # gRPC 服务端实现，承接远端 Get/Set/Delete 请求
+├── balancer.go                 # ring 配置发布与动态配置辅助（控制面预留）
 ├── consistenthash/
+│   ├── config.go               # 一致性哈希配置（副本数、哈希函数等）
+│   └── con_hash.go             # 哈希环实现：Add/Remove/Get、权重副本
 ├── store/
+│   ├── store.go                # Store 接口定义与工厂
+│   ├── lru.go                  # LRU 缓存实现（链表 + map + 过期清理）
+│   ├── lru2.go                 # LRU-2 缓存实现（两级缓存 + 分桶）
+│   └── lru2_test.go            # LRU-2 相关测试
 ├── singleflight/
+│   └── singleflight.go         # 同 key 并发请求合并
 ├── registry/
+│   └── register.go             # etcd 注册（租约、续约、注销）
 ├── pb/
+│   ├── kvcache.proto           # gRPC 协议定义
+│   └── *.pb.go                 # protobuf / gRPC 生成代码
 ├── cmd/
 │   ├── server/
+│   │   └── main.go             # 服务启动入口（参数解析、组装 server + picker）
 │   └── client/
-└── scripts/
+│       └── main.go             # 命令行客户端入口（get/set/delete）
+├── scripts/
+│   └── test.ps1                # PowerShell 快速联调脚本（多节点启动与验证）
+├── study.md                    # 系统学习文档（架构、流程、设计思想）
+├── mainwork.md                 # 简历工作项与代码实现映射说明
+├── go.mod / go.sum             # Go 依赖管理
+└── README.md                   # 项目说明文档
 ```
 
 ---

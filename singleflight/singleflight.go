@@ -20,12 +20,12 @@ type Group struct {
 func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
 	newCall := &call{}
 	newCall.wg.Add(1)
-
-	actual, loaded := g.m.LoadOrStore(key, newCall)
+	// loaded == false：当前协程是 leader，执行 fn
+	// loaded == true：说明已有 leader 在跑，当前协程 Wait()
+	actual, loaded := g.m.LoadOrStore(key, newCall)//LoadOrStore 如果key存在，则返回value，否则存储新的value
 	c := actual.(*call)
-
 	if loaded {
-		c.wg.Wait() // Wait for the existing request to finish
+		c.wg.Wait() // 等待正在进行的请求完成  newCall废弃
 		return c.val, c.err
 	}
 

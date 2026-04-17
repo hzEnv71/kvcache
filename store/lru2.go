@@ -6,14 +6,28 @@ import (
 	"time"
 )
 
+// lru2Store 是两级缓存实现：
+// - level1: 首次访问写入（候选区）
+// - level2: 再次命中后提升（热点区）
+//
+// 分桶设计：
+// - 同一 key 固定落到某个 bucket；
+// - 每个 bucket 一把锁，降低全局锁竞争。
 type lru2Store struct {
 	locks       []sync.Mutex
-	caches      [][2]*cache
+	caches      [][2]*cache // [bucket][level]
 	onEvicted   func(key string, value Value)
 	cleanupTick *time.Ticker
 	mask        int32
 }
 
+// newLRU2Cache 创建 LRU-2 存储实例并初始化分桶。
+//
+// 默认值策略：
+// - BucketCount: 16
+// - CapPerBucket: 1024
+// - Level2Cap: 1024
+// - CleanupInterval: 1min
 func newLRU2Cache(opts Options) *lru2Store {
 	if opts.BucketCount == 0 {
 		opts.BucketCount = 16
@@ -49,6 +63,12 @@ func newLRU2Cache(opts Options) *lru2Store {
 	return s
 }
 
+// Get 读取 key。
+//
+// LRU-2 核心行为：
+// 1) 先查一级缓存；若命中且未过期，则“提升”到二级缓存；
+// 2) 一级未命中再查二级缓存；
+// 3) 任何级别命中过期都立即删除并返回 miss。
 func (s *lru2Store) Get(key string) (Value, bool) {
 	idx := hashBKRD(key) & s.mask
 	s.locks[idx].Lock()
@@ -56,30 +76,25 @@ func (s *lru2Store) Get(key string) (Value, bool) {
 
 	currentTime := Now()
 
-	// 首先检查一级缓存
+	// 一级：首次访问区（命中后提升到二级）
 	n1, status1, expireAt := s.caches[idx][0].del(key)
 	if status1 > 0 {
-		// 从一级缓存找到项目
 		if expireAt > 0 && currentTime >= expireAt {
-			// 项目已过期，删除它
 			s.delete(key, idx)
 			return nil, false
 		}
 
-		// 项目有效，将其移至二级缓存
 		s.caches[idx][1].put(key, n1.v, expireAt, s.onEvicted)
 		return n1.v, true
 	}
 
-	// 一级缓存未找到，检查二级缓存
+	// 二级：稳定热点区
 	n2, status2 := s._get(key, idx, 1)
 	if status2 > 0 && n2 != nil {
 		if n2.expireAt > 0 && currentTime >= n2.expireAt {
-			// 项目已过期，删除它
 			s.delete(key, idx)
 			return nil, false
 		}
-
 		return n2.v, true
 	}
 
@@ -90,11 +105,14 @@ func (s *lru2Store) Set(key string, value Value) error {
 	return s.SetWithExpiration(key, value, 9999999999999999)
 }
 
+// SetWithExpiration 写入 key。
+//
+// 设计选择：
+// - 新写入统一先进入一级缓存；
+// - 只有再次访问时才会提升到二级缓存，减少偶发访问污染热点区。
 func (s *lru2Store) SetWithExpiration(key string, value Value, expiration time.Duration) error {
-	// 计算过期时间 - 确保单位一致
 	expireAt := int64(0)
 	if expiration > 0 {
-		// now() 返回纳秒时间戳，确保 expiration 也是纳秒单位
 		expireAt = Now() + int64(expiration.Nanoseconds())
 	}
 
@@ -102,9 +120,7 @@ func (s *lru2Store) SetWithExpiration(key string, value Value, expiration time.D
 	s.locks[idx].Lock()
 	defer s.locks[idx].Unlock()
 
-	// 放入一级缓存
 	s.caches[idx][0].put(key, value, expireAt, s.onEvicted)
-
 	return nil
 }
 
@@ -359,6 +375,10 @@ func (s *lru2Store) delete(key string, idx int32) bool {
 	return deleted
 }
 
+// cleanupLoop 定期清理各 bucket 的过期 key。
+//
+// 为避免遍历中直接修改结构导致复杂度上升，
+// 先收集过期 key，再批量 delete。
 func (s *lru2Store) cleanupLoop() {
 	for range s.cleanupTick.C {
 		currentTime := Now()
@@ -366,7 +386,6 @@ func (s *lru2Store) cleanupLoop() {
 		for i := range s.caches {
 			s.locks[i].Lock()
 
-			// 检查并清理过期项目
 			var expiredKeys []string
 
 			s.caches[i][0].walk(func(key string, value Value, expireAt int64) bool {

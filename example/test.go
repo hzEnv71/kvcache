@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	lcache "github.com/youngyangyang04/KVCache-Go"
+	lcache "KVCache"
 )
 
 func main() {

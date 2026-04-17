@@ -51,7 +51,13 @@ func newLRUCache(opts Options) *lruCache {
 	return c
 }
 
-// Get 获取缓存项，如果存在且未过期则返回
+// Get 获取缓存项（命中且未过期时返回 true）。
+//
+// 两阶段锁设计：
+// 1) 先用读锁快速读取与过期判断；
+// 2) 命中后再短暂升级为写锁，把节点移动到 LRU 尾部（最新访问）。
+//
+// 这样可在读多写少场景下降低锁竞争，同时保持 LRU 顺序正确。
 func (c *lruCache) Get(key string) (Value, bool) {
 	c.mu.RLock()
 	elem, ok := c.items[key]
@@ -60,24 +66,21 @@ func (c *lruCache) Get(key string) (Value, bool) {
 		return nil, false
 	}
 
-	// 检查是否过期
+	// 过期判断：now > expTime 视为过期
 	if expTime, hasExp := c.expires[key]; hasExp && time.Now().After(expTime) {
 		c.mu.RUnlock()
 
-		// 异步删除过期项，避免在读锁内操作
+		// 过期删除使用异步，避免在读锁内执行写操作
 		go c.Delete(key)
-
 		return nil, false
 	}
 
-	// 获取值并释放读锁
 	entry := elem.Value.(*lruEntry)
 	value := entry.value
 	c.mu.RUnlock()
 
-	// 更新 LRU 位置需要写锁
+	// 命中后刷新访问顺序（移到尾部）
 	c.mu.Lock()
-	// 再次检查元素是否仍然存在（可能在获取写锁期间被其他协程删除）
 	if _, ok := c.items[key]; ok {
 		c.list.MoveToBack(elem)
 	}
@@ -107,7 +110,7 @@ func (c *lruCache) SetWithExpiration(key string, value Value, expiration time.Du
 		expTime = time.Now().Add(expiration)
 		c.expires[key] = expTime
 	} else {
-		delete(c.expires, key)
+		delete(c.expires, key)//默认不过期 删除过期时间
 	}
 
 	// 如果键已存在，更新值
@@ -238,14 +241,12 @@ func (c *lruCache) GetWithExpiration(key string) (Value, time.Duration, bool) {
 	// 检查是否过期
 	now := time.Now()
 	if expTime, hasExp := c.expires[key]; hasExp {
-		if now.After(expTime) {
-			// 已过期
+		if now.After(expTime) {			// 已过期
 			return nil, 0, false
 		}
-
 		// 计算剩余过期时间
 		ttl := expTime.Sub(now)
-		c.list.MoveToBack(elem)
+		c.list.MoveToBack(elem)//移到尾部（最新）
 		return elem.Value.(*lruEntry).value, ttl, true
 	}
 

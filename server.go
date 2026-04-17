@@ -9,9 +9,10 @@ import (
 
 	"crypto/tls"
 
+	etcd "KVCache/etcd"
+	pb "KVCache/pb"
+
 	"github.com/sirupsen/logrus"
-	pb "github.com/youngyangyang04/KVCache-Go/pb"
-	"github.com/youngyangyang04/KVCache-Go/registry"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -74,18 +75,23 @@ func WithTLS(certFile, keyFile string) ServerOption {
 	}
 }
 
-// NewServer 创建新的服务器实例
+// NewServer 创建服务器实例。
+//
+// 关键点：
+// - 先深拷贝默认配置，再应用外部 option，避免污染全局默认值；
+// - 初始化 etcd client（用于注册/发现链路）；
+// - 初始化 gRPC server，并注册 KVCache + 健康检查服务。
 func NewServer(addr, svcName string, opts ...ServerOption) (*Server, error) {
 	options := &ServerOptions{
-		EtcdEndpoints: append([]string(nil), DefaultServerOptions.EtcdEndpoints...),
+		EtcdEndpoints: append([]string(nil), DefaultServerOptions.EtcdEndpoints...), //避免直接赋值 会共享底层数组
 		DialTimeout:   DefaultServerOptions.DialTimeout,
 		MaxMsgSize:    DefaultServerOptions.MaxMsgSize,
-		TLS:           DefaultServerOptions.TLS,
-		CertFile:      DefaultServerOptions.CertFile,
-		KeyFile:       DefaultServerOptions.KeyFile,
+		TLS:           DefaultServerOptions.TLS,      //默认不启用TLS
+		CertFile:      DefaultServerOptions.CertFile, //默认证书文件
+		KeyFile:       DefaultServerOptions.KeyFile,  //默认密钥文件
 	}
 	for _, opt := range opts {
-		opt(options)
+		opt(options) //把某个配置修改动作，应用到 options 上
 	}
 
 	// 创建etcd客户端
@@ -130,18 +136,21 @@ func NewServer(addr, svcName string, opts ...ServerOption) (*Server, error) {
 	return srv, nil
 }
 
-// Start 启动服务器
+// Start 启动服务器。
+//
+// 执行顺序：
+// 1) 监听 TCP 端口；
+// 2) 异步注册到 etcd（租约续约由 registry 维护）；
+// 3) 启动 gRPC Serve 阻塞服务。
 func (s *Server) Start() error {
-	// 启动gRPC服务器
 	lis, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %v", err)
 	}
 
-	// 注册到etcd
 	stopCh := make(chan error)
 	go func() {
-		if err := registry.Register(s.svcName, s.addr, stopCh); err != nil {
+		if err := etcd.Register(s.svcName, s.addr, stopCh); err != nil { //注册服务到etcd
 			logrus.Errorf("failed to register service: %v", err)
 			close(stopCh)
 			return
@@ -155,8 +164,8 @@ func (s *Server) Start() error {
 // Stop 停止服务器
 func (s *Server) Stop() {
 	close(s.stopCh)
-	s.grpcServer.GracefulStop()
-	if s.etcdCli != nil {
+	s.grpcServer.GracefulStop()//优雅停止gRPC服务器
+	if s.etcdCli != nil {//关闭etcd客户端
 		s.etcdCli.Close()
 	}
 }
@@ -176,18 +185,16 @@ func (s *Server) Get(ctx context.Context, req *pb.Request) (*pb.ResponseForGet, 
 	return &pb.ResponseForGet{Value: view.ByteSLice()}, nil
 }
 
-// Set 实现Cache服务的Set方法
+// Set 实现写入接口。
+//
+// 注意：这里不能强行给请求打 from_peer 标记。
+// - 普通客户端请求应保持原始上下文，由 Group 决定是否路由 owner；
+// - 只有 peer 转发请求才应携带 from_peer，避免绕过 owner 路由。
 func (s *Server) Set(ctx context.Context, req *pb.Request) (*pb.ResponseForGet, error) {
 	group := GetGroup(req.Group)
 	if group == nil {
 		return nil, fmt.Errorf("group %s not found", req.Group)
 	}
-
-	// 从 context 中获取标记，如果没有则创建新的 context
-	// fromPeer := ctx.Value("from_peer")
-	// if fromPeer == nil {
-	// 	ctx = context.WithValue(ctx, "from_peer", true)
-	// }
 
 	if err := group.Set(ctx, req.Key, req.Value); err != nil {
 		return nil, err

@@ -1,4 +1,4 @@
-module github.com/youngyangyang04/KVCache-Go
+module KVCache
 
 go 1.22
 

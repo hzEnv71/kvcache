@@ -1,6 +1,8 @@
 # KVCache 学习文档（从 0 到 1）
 
 > 目标：带你从“为什么做”到“怎么跑”，再到“每个模块如何协作”，系统掌握这个项目。
+>
+> 本文后半部分增加了“按模块逐层拆解函数与调用链”的详细说明，方便你从源码级别理解整个系统。
 
 ---
 
@@ -45,25 +47,20 @@ KVCache 对应做法：
 可以把代码按 6 层看：
 
 1. **业务入口层**：`group.go`
-   - 面向使用者的核心 API：`Get/Set/Delete/Clear/Stats`
-
+  - 面向使用者的核心 API：`Get/Set/Delete/Clear/Stats`
 2. **本地缓存层**：`cache.go`
-   - 把底层存储封装为统一缓存对象，含命中统计、生命周期管理
-
+  - 把底层存储封装为统一缓存对象，含命中统计、生命周期管理
 3. **存储引擎层**：`store/`
-   - `lru.go`：经典 LRU
-   - `lru2.go`：两级 LRU（提高热点识别能力）
-
+  - `lru.go`：经典 LRU
+  - `lru2.go`：两级 LRU（提高热点识别能力）
 4. **并发控制层**：`singleflight/`
-   - 同一个 key 的并发加载只执行一次
-
+  - 同一个 key 的并发加载只执行一次
 5. **分布式路由层**：`consistenthash/` + `peers.go`
-   - 一致性哈希决定 key 应该去哪个节点
-   - ClientPicker 通过 etcd 感知节点变化
-
+  - 一致性哈希决定 key 应该去哪个节点
+  - ClientPicker 通过 etcd 感知节点变化
 6. **通信与注册层**：`server.go` + `client.go` + `registry/`
-   - gRPC 提供对外服务
-   - etcd 负责注册与发现
+  - gRPC 提供对外服务
+  - etcd 负责注册与发现
 
 ---
 
@@ -72,25 +69,19 @@ KVCache 对应做法：
 建议这个顺序最容易上手：
 
 1. `byteview.go`
-   - 缓存值抽象，理解“只读视图 + 拷贝语义”
-
+  - 缓存值抽象，理解“只读视图 + 拷贝语义”
 2. `cache.go`
-   - 本地缓存壳层，理解 store 抽象
-
+  - 本地缓存壳层，理解 store 抽象
 3. `store/store.go` + `store/lru.go`
-   - 先掌握标准 LRU 的实现
-
+  - 先掌握标准 LRU 的实现
 4. `singleflight/singleflight.go`
-   - 看并发请求合并
-
+  - 看并发请求合并
 5. `group.go`
-   - 这是核心：把缓存、peer、loader 串起来
-
+  - 这是核心：把缓存、peer、loader 串起来
 6. `consistenthash/con_hash.go`
-   - 看 key 如何路由到节点
-
+  - 看 key 如何路由到节点
 7. `client.go` / `server.go` / `peers.go` / `registry/register.go`
-   - 看分布式如何落地
+  - 看分布式如何落地
 
 ---
 
@@ -112,7 +103,7 @@ KVCache 对应做法：
 关键行为：
 
 - `Get`：本地命中 -> 按一致性哈希找 owner -> owner 读取或回源
-- `Set/Delete`：严格路由到 owner（同步执行，失败直接返回）
+- `Set/Delete`：先本地执行，再异步同步到 owner（最终一致）
 - `Stats`：暴露命中率和加载统计
 
 ---
@@ -164,9 +155,9 @@ KVCache 对应做法：
 4. 未命中：进入 `load`
 5. `singleflight.Do(key, fn)` 合并并发 miss
 6. `loadData`：
-   - 先 `PickPeer(key)` 选 owner
-   - owner 是远端：走 gRPC `peer.Get`
-   - owner 是本机：回源 `getter.Get`
+  - 先 `PickPeer(key)` 选 owner
+  - owner 是远端：走 gRPC `peer.Get`
+  - owner 是本机：回源 `getter.Get`
 7. 拿到结果后写回本地缓存
 8. 返回结果
 
@@ -174,25 +165,25 @@ KVCache 对应做法：
 
 ---
 
-## 6.2 `Set` 流程（已升级为 P0）
+## 6.2 `Set` 流程（当前实现）
 
 1. `Group.Set`
-2. 如果是 peer 转发请求（`from_peer`）-> 直接本地写
-3. 否则必须 `PickPeer(key)` 找 owner：
-   - owner 是远端：同步 `peer.Set`，失败直接返回
-   - owner 是本机：本地写
+2. 先写本地缓存（支持 TTL）
+3. 如果不是 peer 转发请求（无 `from_peer`）且开启了 peers：
+  - 异步 `syncToPeers("set")` 同步到 owner
 
-说明：这是“同步 owner 写”语义，避免“写成功但跨节点读不到”的假成功。
+说明：这是“本地先写 + 异步同步”的最终一致语义，返回成功不代表远端一定已完成。
 
 ---
 
-## 6.3 `Delete` 流程（同 P0）
+## 6.3 `Delete` 流程（当前实现）
 
 与 `Set` 对齐：
 
-1. peer 转发请求：本地删
-2. 普通请求：必须路由 owner
-3. owner 远端则同步删，失败直接返回
+1. 先删本地缓存
+2. 非 peer 请求时异步 `syncToPeers("delete")`
+
+说明：删除链路同样是最终一致模型。
 
 ---
 
@@ -268,14 +259,13 @@ KVCache 对应做法：
 你要区分两条平面：
 
 1. **数据面（Data Plane）**
-   - 放业务缓存数据（热点 key/value）
-   - 追求高吞吐、低延迟
-   - 对应本项目：`Group + Cache + Store + gRPC 节点`
-
+  - 放业务缓存数据（热点 key/value）
+  - 追求高吞吐、低延迟
+  - 对应本项目：`Group + Cache + Store + gRPC 节点`
 2. **控制面（Control Plane）**
-   - 放服务元数据（节点地址、在线状态、租约、拓扑变更）
-   - 追求一致性与可靠感知
-   - 对应本项目：`etcd + registry + peers watcher`
+  - 放服务元数据（节点地址、在线状态、租约、拓扑变更）
+  - 追求一致性与可靠感知
+  - 对应本项目：`etcd + registry + peers watcher`
 
 所以不是“两个缓存重复造轮子”，而是分工不同：
 
@@ -306,7 +296,7 @@ KVCache 对应做法：
 3. singleflight 并发窗口（Load/Store 非原子）
 4. consistenthash 读锁下写 map
 5. lru2 调试输出污染日志
-6. server 侧误标记 `from_peer` 导致绕过 owner 路由
+6. server 侧误标记 `from_peer` 导致错误同步语义
 7. 一致性哈希本地自动重平衡导致多节点 ring 不一致
 
 学习意义：
@@ -387,50 +377,1002 @@ KVCache 对应做法：
 
 ---
 
-## 14. 一份最小可运行心智模型（背下来）
+# 16. 按模块逐层拆解：函数、职责、调用与执行流程
 
-> 一个 key 进来：
->
-> 先查本地缓存；
-> 本地 miss 时并发合并；
-> 然后按一致性哈希找 owner；
-> owner 远端则走 peer，owner 本机则回源 getter；
-> 拿到值写回本地；
-> 写操作必须同步路由到 owner，失败直接返回。
+这一部分用于“从源码层面理解每个模块怎么协作”。如果你要真正读懂项目，建议按下面顺序看：
 
-你把这段讲清楚，基本就掌握这个项目主干了。
-
----
-
-## 15. 附：常用命令（你当前改造后的）
-
-启动节点：
-
-```bash
-go run ./cmd/server --addr 127.0.0.1:8001 --svc kv-cache --group test --etcd 127.0.0.1:2379
-```
-
-写入：
-
-```bash
-go run ./cmd/client --op set --addr 127.0.0.1:8001 --group test --key k1 --value v1
-```
-
-读取：
-
-```bash
-go run ./cmd/client --op get --addr 127.0.0.1:8002 --group test --key k1
-```
-
-删除：
-
-```bash
-go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k1
-```
+1. `cmd/server/main.go`
+2. `cmd/client/main.go`
+3. `server.go`
+4. `group.go`
+5. `cache.go`
+6. `store/store.go`
+7. `store/lru.go`
+8. `store/lru2.go`
+9. `singleflight/singleflight.go`
+10. `consistenthash/con_hash.go`
+11. `peers.go`
+12. `client.go`
+13. `registry/register.go`
 
 ---
 
-如果你愿意，下一步我可以继续给你补两份学习材料：
+## 16.1 `cmd/server/main.go`：服务启动入口
 
-1. `study-sequence.md`：逐文件精读清单（每个函数要看什么）
-2. `interview-qa.md`：基于本项目的高频面试题与标准答案
+### 这个文件负责什么
+
+它是“整个服务端程序”的入口，主要工作是：
+
+- 解析命令行参数
+- 构造 `Server`
+- 构造 `Group`
+- 构造 `ClientPicker`
+- 把 `ClientPicker` 注册到 `Group`
+- 启动 gRPC 服务
+- 等待退出信号
+
+### 主要函数
+
+#### `main()`
+
+核心步骤：
+
+1. 读取参数：
+  - `--addr`：当前节点地址
+  - `--svc`：服务名
+  - `--group`：缓存组名
+  - `--cache-bytes`：缓存容量
+  - `--expiration`：默认 TTL
+  - `--etcd`：etcd 地址
+2. 调用 `kvcache.NewServer(...)`
+3. 调用 `kvcache.NewGroup(...)`
+4. 调用 `kvcache.NewClientPicker(...)`
+5. 调用 `group.RegisterPeers(picker)`
+6. 启动 `srv.Start()`
+7. 等待退出信号后 `picker.Close()`、`srv.Stop()`
+
+### 调用链
+
+```text
+main()
+ ├─ NewServer(...)
+ ├─ NewGroup(...)
+ ├─ NewClientPicker(...)
+ ├─ group.RegisterPeers(picker)
+ └─ srv.Start()
+```
+
+### 执行意义
+
+这个入口把“缓存系统需要的所有组件”串了起来：
+
+- `Server` 负责网络入口
+- `Group` 负责业务缓存
+- `ClientPicker` 负责分布式路由
+- etcd 负责服务发现
+
+---
+
+## 16.2 `cmd/client/main.go`：命令行客户端入口
+
+### 这个文件负责什么
+
+它是用来测试和验证集群读写的 CLI 工具。
+
+### 主要流程
+
+1. 解析参数：
+  - `--op`：get/set/delete
+  - `--addr`：目标节点地址
+  - `--group`：组名
+  - `--key`：缓存 key
+  - `--value`：set 时使用
+  - `--timeout`：请求超时
+2. 使用 `grpc.DialContext(...)` 连接目标节点
+3. 创建 `pb.NewKVCacheClient(conn)`
+4. 根据 `--op` 调用：
+  - `cli.Get`
+  - `cli.Set`
+  - `cli.Delete`
+
+### 调用链
+
+```text
+main()
+ ├─ grpc.DialContext(...)
+ ├─ pb.NewKVCacheClient(conn)
+ ├─ cli.Get / cli.Set / cli.Delete
+ └─ 打印结果
+```
+
+### 执行意义
+
+这是你联调整个集群的最小工具：
+
+- 验证节点是否活着
+- 验证跨节点读写是否正常
+- 验证 owner 路由是否正确
+
+---
+
+## 16.3 `server.go`：gRPC 服务端与服务注册
+
+### 这个文件负责什么
+
+`server.go` 是 KVCache 的 RPC 服务实现层：
+
+- 它定义了 `Server` 结构体
+- 它负责启动 gRPC 服务
+- 它负责实现 `Get/Set/Delete`
+- 它负责把节点注册到 etcd
+
+### 核心结构体：`Server`
+
+字段含义：
+
+- `addr`：本节点地址
+- `svcName`：服务名
+- `groups`：缓存组集合
+- `grpcServer`：gRPC 服务实例
+- `etcdCli`：etcd 客户端
+- `stopCh`：停止信号
+- `opts`：服务器配置
+
+### 核心函数
+
+#### `NewServer(addr, svcName string, opts ...ServerOption)`
+
+作用：构建一个可用的服务端对象。
+
+步骤：
+
+1. 拷贝默认配置
+2. 应用 option
+3. 创建 etcd client
+4. 创建 gRPC server
+5. 注册 KVCache 服务
+6. 注册 health 服务
+
+#### `Start()`
+
+作用：启动网络监听并注册到 etcd。
+
+步骤：
+
+1. `net.Listen("tcp", s.addr)`
+2. `etcd.Register(...)` 异步注册
+3. `s.grpcServer.Serve(lis)` 阻塞运行
+
+#### `Stop()`
+
+作用：优雅停止。
+
+步骤：
+
+1. 关闭 stop 信号
+2. `GracefulStop()`
+3. 关闭 etcd client
+
+#### `Get(ctx, req)`
+
+作用：处理远端读取请求。
+
+流程：
+
+1. 根据 `req.Group` 找 `Group`
+2. 调 `group.Get(ctx, req.Key)`
+3. 把 `ByteView` 转成响应返回
+
+#### `Set(ctx, req)`
+
+作用：处理远端写请求。
+
+流程：
+
+1. 找 `Group`
+2. 调 `group.Set(ctx, req.Key, req.Value)`
+3. 返回写入结果
+
+#### `Delete(ctx, req)`
+
+作用：处理远端删除请求。
+
+流程：
+
+1. 找 `Group`
+2. 调 `group.Delete(ctx, req.Key)`
+3. 返回删除结果
+
+### 调用链
+
+```text
+Start()
+ ├─ net.Listen
+ ├─ registry.Register
+ └─ grpcServer.Serve
+
+Get/Set/Delete
+ └─ GetGroup(req.Group)
+     └─ group.Get / group.Set / group.Delete
+```
+
+---
+
+## 16.4 `group.go`：整个缓存系统的核心业务层
+
+### 这个文件负责什么
+
+`group.go` 是整个项目最核心的业务层，负责把：
+
+- 本地缓存
+- 并发控制
+- 分布式路由
+- 数据源回源
+
+串成一条完整的缓存链路。
+
+### 核心结构体：`Group`
+
+字段含义：
+
+- `name`：组名
+- `getter`：回源函数
+- `mainCache`：本地缓存
+- `peers`：节点选择器
+- `loader`：singleflight
+- `expiration`：默认过期时间
+- `closed`：关闭状态
+- `stats`：统计信息
+
+### 关键函数
+
+#### `NewGroup(name, cacheBytes, getter, opts...)`
+
+作用：创建缓存组。
+
+步骤：
+
+1. 创建默认 `CacheOptions`
+2. 初始化 `Cache`
+3. 初始化 `singleflight.Group`
+4. 应用 `GroupOption`
+5. 注册到全局 `groups` map
+
+#### `Get(ctx, key)`
+
+作用：读取一个 key。
+
+执行顺序：
+
+1. 检查 `closed`
+2. 检查 `key`
+3. 调 `mainCache.Get`
+4. 命中直接返回
+5. miss 后进入 `load(ctx, key)`
+
+#### `load(ctx, key)`
+
+作用：把并发 miss 合并起来。
+
+步骤：
+
+1. 记录开始时间
+2. 调 `g.loader.Do(key, func() {...})`
+3. 执行 `loadData(ctx, key)`
+4. 统计加载耗时和次数
+5. 把结果写回 `mainCache`
+
+#### `loadData(ctx, key)`
+
+作用：真正决定去哪里拿数据。
+
+逻辑：
+
+1. 如果启用了 `peers`：
+  - `PickPeer(key)` 找 owner
+  - owner 是远端：`getFromPeer(ctx, peer, key)`
+  - owner 是本机：`getter.Get(ctx, key)`
+2. 如果没有 `peers`：直接回源 `getter.Get`
+
+#### `getFromPeer(ctx, peer, key)`
+
+作用：远程拿数据。
+
+流程：
+
+1. 调 `peer.Get(g.name, key)`
+2. 转成 `ByteView`
+3. 返回给 `loadData`
+
+#### `Set(ctx, key, value)`
+
+作用：写入缓存。
+
+当前语义：
+
+1. 先判断是否来自 peer
+2. 本地写入 `mainCache`
+3. 如果不是 peer 请求且开启 peers：异步 `syncToPeers("set")`
+
+#### `Delete(ctx, key)`
+
+作用：删除缓存。
+
+当前语义：
+
+1. 本地先删
+2. 如果不是 peer 请求且开启 peers：异步 `syncToPeers("delete")`
+
+#### `syncToPeers(ctx, op, key, value)`
+
+作用：把变更同步到 owner 节点。
+
+步骤：
+
+1. `PickPeer(key)`
+2. 如果 owner 是自己，直接返回
+3. 构造 `from_peer=true`
+4. 调 `peer.Set` 或 `peer.Delete`
+5. 失败只打日志
+
+#### `Stats()`
+
+作用：输出统计数据。
+
+会返回：
+
+- 命中率
+- 加载次数
+- peer 命中/失败次数
+- 缓存大小
+
+### 调用链
+
+```text
+server.go:Get/Set/Delete
+ └─ group.Get / group.Set / group.Delete
+     ├─ mainCache.Get / mainCache.Add / mainCache.Delete
+     ├─ load()
+     │   └─ singleflight.Do
+     │       └─ loadData()
+     │           ├─ peers.PickPeer
+     │           ├─ peer.Get
+     │           └─ getter.Get
+     └─ syncToPeers()
+```
+
+---
+
+## 16.5 `cache.go`：本地缓存封装层
+
+### 这个文件负责什么
+
+`cache.go` 是 `group.go` 和 `store/` 之间的桥梁。
+
+它不关心“分布式”，只关心“本机怎么缓存”。
+
+### 核心结构体：`Cache`
+
+典型职责：
+
+- 延迟初始化底层 store
+- 统计命中率
+- 管理 TTL
+- 清理资源
+
+### 核心函数
+
+#### `NewCache(opts)`
+
+作用：创建一个缓存对象。
+
+#### `Get(ctx, key)`
+
+作用：从本地缓存读取。
+
+流程：
+
+1. 调底层 `store.Get`
+2. 若命中，统计 hit
+3. 若未命中，统计 miss
+4. 返回结果
+
+#### `Add / AddWithExpiration`
+
+作用：写入缓存。
+
+#### `Delete`
+
+作用：删除 key。
+
+#### `Clear`
+
+作用：清空缓存。
+
+#### `Close`
+
+作用：关闭底层 store 和后台清理协程。
+
+#### `Stats`
+
+作用：输出命中率等指标。
+
+### 调用链
+
+```text
+group.go
+ ├─ mainCache.Get
+ ├─ mainCache.Add
+ ├─ mainCache.AddWithExpiration
+ └─ mainCache.Delete
+     └─ cache.go 再转到 store/*
+```
+
+---
+
+## 16.6 `store/store.go`：存储抽象接口与工厂
+
+### 这个文件负责什么
+
+这里定义了底层缓存存储的统一接口，目的是让上层不用关心具体实现是 LRU 还是 LRU-2。
+
+### 核心内容
+
+#### `Value` 接口
+
+表示一个可以计算长度的缓存值。
+
+#### `Store` 接口
+
+底层存储必须实现：
+
+- `Get`
+- `Set`
+- `SetWithExpiration`
+- `Delete`
+- `Clear`
+- `Len`
+- `Close`
+
+#### `Options` / `NewOptions()`
+
+提供底层默认配置。
+
+#### `NewStore(cacheType, opts)`
+
+根据缓存类型创建对应存储：
+
+- `LRU` -> `newLRUCache(opts)`
+- `LRU2` -> `newLRU2Cache(opts)`
+
+### 调用链
+
+```text
+cache.go
+ └─ NewCache(opts)
+     └─ NewStore(cacheType, store.Options)
+```
+
+---
+
+## 16.7 `store/lru.go`：标准 LRU 实现
+
+### 这个文件负责什么
+
+实现一个标准的 LRU 缓存：
+
+- 双向链表保存访问顺序
+- map 保存 key -> 节点索引
+- 容量满时淘汰最旧节点
+- 支持 TTL 过期
+
+### 核心结构
+
+#### `lruCache`
+
+典型字段包括：
+
+- `mu`：读写锁
+- `items`：key -> 链表节点
+- `list`：双向链表
+- `expires`：过期时间表
+- `usedBytes`：已使用容量
+- `maxBytes`：最大容量
+
+### 关键函数
+
+#### `Get(key)`
+
+步骤：
+
+1. 读锁查 key 是否存在
+2. 如果不存在，返回 miss
+3. 检查是否过期
+4. 如果过期，异步删除
+5. 如果命中，读取 value
+6. 升级到写锁，将该节点移动到最近访问位置
+7. 返回 value
+
+#### `Set(key, value)`
+
+本质上调用 `SetWithExpiration(key, value, 0)`。
+
+#### `SetWithExpiration(key, value, expiration)`
+
+步骤：
+
+1. value 为空则删除 key
+2. 写锁保护
+3. 计算过期时间
+4. key 已存在 -> 更新值并刷新位置
+5. key 不存在 -> 新建节点插到链表尾
+6. 判断是否需要 eviction
+
+#### `Delete(key)`
+
+删除某个 key。
+
+#### `evict()`
+
+当容量不足时触发淘汰。
+
+一般流程：
+
+1. 优先清理过期项
+2. 再从链表头淘汰最旧项
+
+#### `cleanupLoop()`
+
+后台定时清理协程：
+
+- 周期性扫描过期 key
+- 统一删除
+
+### 调用链
+
+```text
+cache.go -> store.Get / store.Set / store.Delete
+```
+
+---
+
+## 16.8 `store/lru2.go`：两级 LRU 实现
+
+### 这个文件负责什么
+
+`LRU-2` 的目标不是简单替代 LRU，而是：
+
+> 更好地区分“偶发访问”和“稳定热点”。
+
+### 核心思路
+
+- **一级缓存**：首次访问进入这里
+- **二级缓存**：再次访问后提升到这里
+
+这样可以减少偶发访问污染热点区。
+
+### 核心函数
+
+#### `Create(cap)` / 初始化函数
+
+创建双层结构和链表节点空间。
+
+#### `put(key, val, expireAt, onEvicted)`
+
+写入节点。
+
+- key 已存在 -> 更新并移动
+- key 不存在 -> 新插入
+- 容量满 -> 淘汰尾部节点
+
+#### `get(key)`
+
+读取并刷新节点位置。
+
+#### `del(key)`
+
+删除节点，并把它标记为无效。
+
+#### `walk(walker)`
+
+遍历缓存有效节点，用于清理过期项。
+
+#### `adjust(idx, f, t)`
+
+调整链表指针位置，把节点移动到头部或尾部。
+
+#### `Get(key)`
+
+完整逻辑：
+
+1. 先查一级
+2. 一级命中后提升到二级
+3. 一级未命中再查二级
+4. 命中过期则删除
+
+#### `SetWithExpiration(key, value, expiration)`
+
+写入时只放到一级缓存，等待后续访问再提升。
+
+#### `cleanupLoop()`
+
+后台定时扫描每个 bucket 的过期节点并删除。
+
+### 调用链
+
+```text
+cache.go
+ └─ NewStore(LRU2)
+     └─ newLRU2Cache(opts)
+         └─ lru2Store.Get / SetWithExpiration / Delete / cleanupLoop
+```
+
+---
+
+## 16.9 `singleflight/singleflight.go`：并发请求合并
+
+### 这个文件负责什么
+
+它解决的是：
+
+> 同一个 key 同时有很多请求时，只让一个请求真正执行加载逻辑。
+
+### 核心结构
+
+#### `call`
+
+表示一个正在执行的请求：
+
+- `wg`：等待组
+- `val`：结果
+- `err`：错误
+
+#### `Group`
+
+管理 key -> call 的映射。
+
+### 核心函数
+
+#### `Do(key, fn)`
+
+步骤：
+
+1. 创建一个 `call`
+2. `LoadOrStore` 判断这个 key 是否已有正在执行的请求
+3. 如果没有：当前 goroutine 成为 leader，执行 `fn()`
+4. 如果有：当前请求成为 follower，等待 leader 结果
+5. leader 完成后：
+  - 写入结果
+  - `wg.Done()`
+  - 从 map 中删除 key
+6. follower 被唤醒后直接复用结果
+
+### 调用链
+
+```text
+group.go:load
+ └─ singleflight.Group.Do(key, fn)
+     └─ 只执行一次 g.loadData
+```
+
+---
+
+## 16.10 `consistenthash/con_hash.go`：一致性哈希环
+
+### 这个文件负责什么
+
+它负责把 `key` 映射到某个 owner 节点。
+
+### 核心结构
+
+#### `Map`
+
+里面主要有：
+
+- `keys`：排序后的虚拟节点 hash 切片
+- `hashMap`：hash -> node 映射
+- `nodeReplicas`：真实节点对应多少虚拟节点
+- `nodeCounts`：负载统计
+- `totalRequests`：总请求数
+
+### 核心函数
+
+#### `Add(nodes...)`
+
+把真实节点加入哈希环。
+
+#### `AddWithReplicas(node, replicas)`
+
+按指定副本数加入节点，用于权重配置。
+
+#### `Remove(node)`
+
+从环中移除一个节点及其虚拟节点。
+
+#### `Get(key)`
+
+根据 key 的 hash：
+
+1. 在 `keys` 里二分查找
+2. 找到第一个大于等于 hash 的虚拟节点
+3. 返回对应真实节点
+4. 如果找不到，回绕到环起点
+
+#### `startBalancer()`
+
+原来用于自动重平衡，但当前默认关闭，避免各节点 ring 视图不一致。
+
+### 调用链
+
+```text
+peers.go -> consHash.Get(key)
+         -> 得到 owner 地址
+```
+
+---
+
+## 16.11 `peers.go`：服务发现、客户端管理、owner 路由
+
+### 这个文件负责什么
+
+它是“分布式视图层”核心。
+
+职责：
+
+- 从 etcd 获取节点列表
+- 监听节点增删
+- 维护 gRPC client 连接池
+- 维护一致性哈希环
+- 提供 `PickPeer(key)` 路由能力
+
+### 核心结构体：`ClientPicker`
+
+字段：
+
+- `selfAddr`：本机地址
+- `svcName`：服务名
+- `consHash`：哈希环
+- `clients`：addr -> client
+- `weights`：节点权重
+- `etcdCli`：etcd 客户端
+- `ctx/cancel`：生命周期控制
+
+### 核心函数
+
+#### `NewClientPicker(addr, opts...)`
+
+流程：
+
+1. 初始化上下文
+2. 初始化 `consHash`
+3. 初始化 etcd client
+4. 启动服务发现
+
+#### `startServiceDiscovery()`
+
+流程：
+
+1. `fetchAllServices()` 全量同步一次节点信息
+2. `go watchServiceChanges()` 后台持续 watch
+
+#### `fetchAllServices()`
+
+用途：
+
+- 启动时把已存在节点都拉下来
+- 避免只靠 watch 时错过历史节点
+
+#### `watchServiceChanges()`
+
+用途：
+
+- 持续监听 etcd 节点变化
+- 收到事件后交给 `handleWatchEvents()`
+
+#### `handleWatchEvents(events)`
+
+用途：
+
+- Put：节点上线，调用 `set(addr)`
+- Delete：节点下线，调用 `remove(addr)`
+
+#### `set(addr)`
+
+作用：
+
+- 创建新的远端 client
+- 成功后把该节点加入哈希环和 client map
+
+#### `remove(addr)`
+
+作用：
+
+- 关闭 client
+- 从哈希环移除节点
+
+#### `PickPeer(key)`
+
+作用：
+
+- 根据 key 找 owner
+- 如果 owner 是自己：返回 `isSelf=true`
+- 如果 owner 是远端：返回对应 `Peer`
+- 如果节点还没就绪：返回 `ok=false`
+
+### 调用链
+
+```text
+registry/register.go -> etcd 注册
+peers.go -> watch /services/{svc}
+peers.go -> consHash.Get(key)
+peers.go -> client.go 远程调用
+```
+
+---
+
+## 16.12 `client.go`：节点间 RPC 客户端
+
+### 这个文件负责什么
+
+它把 gRPC 调用封装成 `Peer` 接口实现。
+
+### 核心结构体：`Client`
+
+字段：
+
+- `addr`：远端节点地址
+- `svcName`：服务名
+- `etcdCli`：etcd client
+- `conn`：gRPC 连接
+- `grpcCli`：gRPC 业务客户端
+
+### 核心函数
+
+#### `NewClient(addr, svcName, etcdCli)`
+
+流程：
+
+1. 如果没有传 etcd client，则创建默认 etcd client
+2. `grpc.Dial(..., grpc.WithBlock())`
+3. `pb.NewKVCacheClient(conn)`
+4. 返回 `Client`
+
+#### `Get(group, key)`
+
+远程读取：
+
+1. 创建超时 context
+2. 调 `grpcCli.Get(ctx, req)`
+3. 失败返回错误
+4. 成功返回 `[]byte`
+
+#### `Set(ctx, group, key, value)`
+
+远程写入：
+
+1. 调 `grpcCli.Set(ctx, req)`
+2. 返回写结果
+
+#### `Delete(group, key)`
+
+远程删除：
+
+1. 调 `grpcCli.Delete(ctx, req)`
+2. 返回删除状态
+
+#### `Close()`
+
+关闭 gRPC 连接。
+
+### 调用链
+
+```text
+peers.go -> NewClient(addr)
+         -> client.go:Get/Set/Delete
+         -> server.go:Get/Set/Delete
+```
+
+---
+
+## 16.13 `registry/register.go`：etcd 注册与续约
+
+### 这个文件负责什么
+
+它负责把服务节点注册到 etcd，并通过 lease 保持在线状态。
+
+### 核心流程
+
+#### `Register(svcName, addr, stopCh)`
+
+1. 创建 etcd client
+2. 申请 lease
+3. 写入服务 key
+4. 开 keepalive
+5. 等待 stop 信号
+6. revoke lease 并退出
+
+### 调用链
+
+```text
+server.go:Start
+ └─ registry.Register
+     └─ etcd lease + put + keepalive
+```
+
+---
+
+## 17. 从一次请求开始，完整串联所有模块
+
+### 17.1 读请求全链路
+
+```text
+1. client.go 连接某个 server
+2. server.go 收到 gRPC Get 请求
+3. server.go 调用 group.Get
+4. group.go 先查 mainCache
+5. 缓存 miss 后进入 singleflight
+6. singleflight 保证同 key 只有一个加载逻辑执行
+7. group.go.loadData 调用 peers.PickPeer
+8. peers.go 通过 consistenthash 找 owner
+9. 如果 owner 是远端，client.go 发起远程 Get
+10. 如果 owner 是本机，getter.Get 回源
+11. 结果回填 cache.go / store
+12. 返回给 server.go，再返回给客户端
+```
+
+### 17.2 写请求全链路
+
+```text
+1. client.go 发起 Set/Delete
+2. server.go 收到请求
+3. group.go 先写本地 cache
+4. 如果不是 from_peer，则异步 syncToPeers
+5. peers.go 通过 hash 找 owner
+6. client.go 向 owner 发远程 Set/Delete
+7. owner 节点的 server.go 收到请求
+8. group.go 因为 from_peer，只做本地写，不再继续同步
+```
+
+---
+
+## 18. 你可以直接背的总流程描述
+
+> KVCache 的请求链路是：客户端请求先进入 gRPC server，server 转给 group 处理；group 先查本地缓存，miss 后通过 singleflight 合并并发，再通过一致性哈希找到 owner 节点；如果 owner 是远端，就通过 peers 维护的 gRPC client 发起远程调用；如果 owner 是本机，就回源 getter；节点信息则通过 etcd 注册与 watch 维护，底层缓存由 store 提供 LRU/LRU-2 淘汰能力。
+
+---
+
+## 19. 最终学习顺序建议
+
+如果你要逐步读源码，建议按这个顺序：
+
+1. `cmd/server/main.go`
+2. `cmd/client/main.go`
+3. `server.go`
+4. `group.go`
+5. `cache.go`
+6. `store/store.go`
+7. `store/lru.go`
+8. `store/lru2.go`
+9. `singleflight/singleflight.go`
+10. `consistenthash/con_hash.go`
+11. `peers.go`
+12. `client.go`
+13. `registry/register.go`
+
+这样你会先看见“谁在启动”，再看见“谁在处理请求”，最后看见“数据怎么流动”。
+
+---
+
+## 20. 最小心智模型
+
+你只要记住这条线：
+
+```text
+请求进来 -> server -> group -> cache -> store
+                │
+                ├─ miss -> singleflight -> owner 路由 -> peers/client
+                │
+                └─ 注册发现 -> etcd -> peers 更新 ring
+```
+
+这就是整个 KVCache 的执行骨架。

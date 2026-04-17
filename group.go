@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"KVCache/singleflight"
+
 	"github.com/sirupsen/logrus"
-	"github.com/youngyangyang04/KVCache-Go/singleflight"
 )
 
 var (
@@ -39,13 +40,19 @@ func (f GetterFunc) Get(ctx context.Context, key string) ([]byte, error) {
 	return f(ctx, key)
 }
 
-// Group 是一个缓存命名空间
+// Group 是一个缓存命名空间（业务入口核心对象）。
+//
+// 设计职责：
+// 1) 对外提供 Get/Set/Delete 等缓存能力；
+// 2) 维护本地缓存与分布式 peer 路由；
+// 3) 在 miss 场景下通过 singleflight 合并并发加载；
+// 4) 记录统计信息，便于观察命中率与加载开销。
 type Group struct {
-	name       string
-	getter     Getter
-	mainCache  *Cache
-	peers      PeerPicker
-	loader     *singleflight.Group
+	name       string // 组名
+	getter     Getter // 数据源回调
+	mainCache  *Cache // 本地缓存
+	peers      PeerPicker // 分布式节点选择器
+	loader     *singleflight.Group // 并发加载器
 	expiration time.Duration // 缓存过期时间，0表示永不过期
 	closed     int32         // 原子变量，标记组是否已关闭
 	stats      groupStats    // 统计信息
@@ -154,13 +161,18 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	return g.load(ctx, key)
 }
 
-// Set 设置缓存值
+// Set 设置缓存值。
+//
+// 当前语义：
+// 1) 先写本地缓存；
+// 2) 若请求不是来自 peer 转发，则异步向 owner 节点同步写（尽力同步）。
+//
+// 注意：这是“最终一致”写路径，返回成功并不代表远端已完成同步。
 func (g *Group) Set(ctx context.Context, key string, value []byte) error {
-	// 检查组是否已关闭
+	// 基础状态与参数校验
 	if atomic.LoadInt32(&g.closed) == 1 {
 		return ErrGroupClosed
 	}
-
 	if key == "" {
 		return ErrKeyRequired
 	}
@@ -168,20 +180,18 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 		return ErrValueRequired
 	}
 
-	// 检查是否是从其他节点同步过来的请求
+	// 标记来源：若来自 peer，同步逻辑不再继续转发，避免环路
 	isPeerRequest := ctx.Value("from_peer") != nil
 
-	// 创建缓存视图
+	// 本地写入缓存（写路径优先保证本机可读）
 	view := ByteView{b: cloneBytes(value)}
-
-	// 设置到本地缓存
 	if g.expiration > 0 {
 		g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
 	} else {
 		g.mainCache.Add(key, view)
 	}
 
-	// 如果不是从其他节点同步过来的请求，且启用了分布式模式，同步到其他节点
+	// 非 peer 请求时，异步同步到 owner 节点（不阻塞当前请求）
 	if !isPeerRequest && g.peers != nil {
 		go g.syncToPeers(ctx, "set", key, value)
 	}
@@ -189,24 +199,24 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 	return nil
 }
 
-// Delete 删除缓存值
+// Delete 删除缓存值。
+//
+// 当前语义与 Set 对齐：
+// - 先删本地；
+// - 非 peer 请求异步同步删除到 owner；
+// - peer 请求仅本地执行，避免循环删除。
 func (g *Group) Delete(ctx context.Context, key string) error {
-	// 检查组是否已关闭
 	if atomic.LoadInt32(&g.closed) == 1 {
 		return ErrGroupClosed
 	}
-
 	if key == "" {
 		return ErrKeyRequired
 	}
 
-	// 从本地缓存删除
+	// 本地先删，保证本节点读路径立即生效
 	g.mainCache.Delete(key)
 
-	// 检查是否是从其他节点同步过来的请求
 	isPeerRequest := ctx.Value("from_peer") != nil
-
-	// 如果不是从其他节点同步过来的请求，且启用了分布式模式，同步到其他节点
 	if !isPeerRequest && g.peers != nil {
 		go g.syncToPeers(ctx, "delete", key, nil)
 	}
@@ -214,20 +224,23 @@ func (g *Group) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// syncToPeers 同步操作到其他节点
+// syncToPeers 将变更同步到 owner 节点（尽力同步）。
+//
+// 关键点：
+// - 只同步到 PickPeer 选出的目标节点，不做广播；
+// - 通过 from_peer 标记避免对方再次触发同步形成环路；
+// - 失败仅记录日志，不影响当前请求返回（异步语义）。
 func (g *Group) syncToPeers(ctx context.Context, op string, key string, value []byte) {
 	if g.peers == nil {
 		return
 	}
 
-	// 选择对等节点
 	peer, ok, isSelf := g.peers.PickPeer(key)
 	if !ok || isSelf {
 		return
 	}
 
-	// 创建同步请求上下文
-	syncCtx := context.WithValue(context.Background(), "from_peer", true)
+	syncCtx := context.WithValue(context.Background(), "from_peer", true)//设置from_peer标记
 
 	var err error
 	switch op {
@@ -322,7 +335,7 @@ func (g *Group) loadData(ctx context.Context, key string) (value ByteView, err e
 	}
 
 	// 从数据源加载
-	bytes, err := g.getter.Get(ctx, key)
+	bytes, err := g.getter.Get(ctx, key)//目前是做空处理 打印找不到日志 后面可以扩展成从数据库中获取
 	if err != nil {
 		return ByteView{}, fmt.Errorf("failed to get data: %w", err)
 	}

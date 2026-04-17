@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sirupsen/logrus"
-	pb "github.com/youngyangyang04/KVCache-Go/pb"
+	pb "KVCache/pb"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Client 是节点间通信客户端，封装了对远端 KVCache 的 gRPC 调用。
+//
+// 典型生命周期：
+// NewClient -> Get/Set/Delete 多次调用 -> Close 释放连接。
 type Client struct {
 	addr    string
 	svcName string
@@ -22,6 +26,11 @@ type Client struct {
 
 var _ Peer = (*Client)(nil)
 
+// NewClient 创建远端节点客户端。
+//
+// 说明：
+// - 允许复用外部 etcd client；
+// - gRPC 连接采用阻塞拨号，确保返回时连接已可用或明确失败。
 func NewClient(addr string, svcName string, etcdCli *clientv3.Client) (*Client, error) {
 	var err error
 	if etcdCli == nil {
@@ -87,8 +96,11 @@ func (c *Client) Delete(group, key string) (bool, error) {
 	return resp.GetValue(), nil
 }
 
+// Set 向远端节点写入 key/value。
+//
+// ctx 由上层传入，通常用于控制超时与取消。
 func (c *Client) Set(ctx context.Context, group, key string, value []byte) error {
-	resp, err := c.grpcCli.Set(ctx, &pb.Request{
+	_, err := c.grpcCli.Set(ctx, &pb.Request{
 		Group: group,
 		Key:   key,
 		Value: value,
@@ -96,8 +108,6 @@ func (c *Client) Set(ctx context.Context, group, key string, value []byte) error
 	if err != nil {
 		return fmt.Errorf("failed to set value to kvcache: %v", err)
 	}
-	logrus.Infof("grpc set request resp: %+v", resp)
-
 	return nil
 }
 

@@ -7,12 +7,14 @@ import (
 	"os"
 	"time"
 
-	pb "github.com/youngyangyang04/KVCache-Go/pb"
+	pb "KVCache/pb"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
+	//解析命令行参数
 	op := flag.String("op", "get", "operation: get|set|delete")
 	addr := flag.String("addr", "127.0.0.1:8001", "target server address")
 	group := flag.String("group", "test", "cache group")
@@ -33,7 +35,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-
+	//创建gRPC连接
 	conn, err := grpc.DialContext(
 		ctx,
 		*addr,
@@ -45,10 +47,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer conn.Close()
-
+	//创建gRPC客户端
 	cli := pb.NewKVCacheClient(conn)
+	//创建请求
 	req := &pb.Request{Group: *group, Key: *key, Value: []byte(*value)}
-
+	//根据操作类型调用不同的方法
 	switch *op {
 	case "get":
 		resp, err := cli.Get(ctx, req)
