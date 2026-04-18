@@ -75,7 +75,7 @@ func Register(svcName, addr string, stopCh <-chan error) error {
 				cli.Revoke(ctx, lease.ID)
 				cancel()
 				return
-			case resp, ok := <-keepAliveCh:
+			case resp, ok := <-keepAliveCh:///租约续期
 				if !ok {
 					logrus.Warn("keep alive channel closed")
 					return

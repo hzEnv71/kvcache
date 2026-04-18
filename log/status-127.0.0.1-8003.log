@@ -7,7 +7,7 @@
     "cache_hits": 1,
     "cache_initialized": true,
     "cache_misses": 0,
-    "cache_size": 1,
+    "cache_size": 0,
     "closed": false,
     "expiration": "10s",
     "hit_rate": 1,
@@ -21,5 +21,5 @@
     "peer_misses": 0
   },
   "svc": "kv-cache",
-  "time": "2026-04-18T12:05:57+08:00"
+  "time": "2026-04-18T14:52:53+08:00"
 }

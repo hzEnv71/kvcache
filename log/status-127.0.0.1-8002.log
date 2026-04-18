@@ -2,25 +2,21 @@
   "addr": "127.0.0.1:8002",
   "group": "test",
   "stats": {
-    "avg_load_time_ms": 0,
     "cache_closed": false,
-    "cache_hit_rate": 0.3333333333333333,
-    "cache_hits": 1,
-    "cache_initialized": true,
-    "cache_misses": 2,
-    "cache_size": 0,
+    "cache_hits": 0,
+    "cache_initialized": false,
+    "cache_misses": 0,
     "closed": false,
     "expiration": "10s",
-    "hit_rate": 0.3333333333333333,
-    "loader_errors": 2,
+    "loader_errors": 0,
     "loader_hits": 0,
-    "loads": 2,
-    "local_hits": 1,
-    "local_misses": 2,
+    "loads": 0,
+    "local_hits": 0,
+    "local_misses": 0,
     "name": "test",
     "peer_hits": 1,
-    "peer_misses": 1
+    "peer_misses": 0
   },
   "svc": "kv-cache",
-  "time": "2026-04-18T12:08:15+08:00"
+  "time": "2026-04-18T14:52:52+08:00"
 }

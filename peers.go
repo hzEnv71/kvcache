@@ -155,7 +155,7 @@ func (p *ClientPicker) fetchAllServices() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for _, kv := range resp.Kvs {
+	for _, kv := range resp.Kvs { ///获取所有服务实例
 		addr := string(kv.Value)
 		if addr != "" {
 			p.addMember(addr)
@@ -175,7 +175,7 @@ func (p *ClientPicker) fetchAllServices() error {
 func (p *ClientPicker) watchServiceChanges() {
 	watcher := clientv3.NewWatcher(p.etcdCli)
 	defer watcher.Close()
-	watchChan := watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix(), clientv3.WithPrevKV())
+	watchChan := watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix(), clientv3.WithPrevKV()) //显示调用 WithPrevKV()
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -191,7 +191,7 @@ func (p *ClientPicker) watchServiceChanges() {
 				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix(), clientv3.WithPrevKV())
 				continue
 			}
-			p.handleWatchEvents(resp.Events)
+			p.handleWatchEvents(resp.Events) ///处理watch事件
 		}
 	}
 }
@@ -210,7 +210,7 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 	for _, event := range events {
 		addr := string(event.Kv.Value)
 		if event.Type == clientv3.EventTypeDelete {
-			addr = string(event.PrevKv.Value)///删除节点时，获取前一个版本节点地址
+			addr = string(event.PrevKv.Value) ///删除节点时，获取前一个版本节点地址
 		}
 		if addr == "" {
 			continue

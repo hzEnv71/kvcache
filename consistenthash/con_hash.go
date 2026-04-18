@@ -3,11 +3,9 @@ package consistenthash
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // Map 一致性哈希实现。
@@ -26,11 +24,11 @@ type Map struct {
 	// 配置信息
 	config *Config
 	// 哈希环
-	keys []int
+	keys []int // 排序后的虚拟节点哈希值切片（形成环）
 	// 哈希环到节点的映射
-	hashMap map[int]string
+	hashMap map[int]string // 虚拟节点哈希值 -> 真实节点地址
 	// 节点到虚拟节点数量的映射
-	nodeReplicas map[string]int
+	nodeReplicas map[string]int // 真实节点 -> 虚拟节点副本数
 	// 节点负载统计
 	nodeCounts map[string]int64
 	// 总请求数
@@ -50,7 +48,6 @@ func New(opts ...Option) *Map {
 		opt(m)
 	}
 
-	// m.startBalancer() // 启动负载均衡器
 	return m
 }
 
@@ -165,7 +162,7 @@ func (m *Map) Get(key string) string {
 	if idx == len(m.keys) {
 		idx = 0
 	}
-
+	//虚拟节点哈希值 通过hashMap 映射回真实节点
 	node := m.hashMap[m.keys[idx]]
 
 	// 统计信息（用于可选负载分析）
@@ -181,122 +178,14 @@ func (m *Map) DumpNodes() []string {
 	defer m.mu.RUnlock()
 
 	seen := make(map[string]struct{})
-	for _, node := range m.hashMap {//遍历hashMap 将节点加入seen
+	for _, node := range m.hashMap { //遍历hashMap 将节点加入seen
 		seen[node] = struct{}{}
 	}
 
 	nodes := make([]string, 0, len(seen))
-	for node := range seen {//遍历seen 将节点加入nodes
+	for node := range seen { //遍历seen 将节点加入nodes
 		nodes = append(nodes, node)
 	}
 	sort.Strings(nodes)
 	return nodes
-}
-
-
-
-
-
-
-
-// checkAndRebalance 检查并重新平衡虚拟节点
-func (m *Map) checkAndRebalance() {
-	if atomic.LoadInt64(&m.totalRequests) < 1000 {
-		return // 样本太少，不进行调整
-	}
-
-	// 计算负载情况
-	avgLoad := float64(m.totalRequests) / float64(len(m.nodeReplicas))
-	var maxDiff float64
-
-	for _, count := range m.nodeCounts {
-		diff := math.Abs(float64(count) - avgLoad)
-		if diff/avgLoad > maxDiff {
-			maxDiff = diff / avgLoad
-		}
-	}
-
-	// 如果负载不均衡度超过阈值，调整虚拟节点
-	if maxDiff > m.config.LoadBalanceThreshold {
-		m.rebalanceNodes()
-	}
-}
-
-// rebalanceNodes 重新平衡节点
-func (m *Map) rebalanceNodes() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	avgLoad := float64(m.totalRequests) / float64(len(m.nodeReplicas))
-
-	// 调整每个节点的虚拟节点数量
-	for node, count := range m.nodeCounts {
-		currentReplicas := m.nodeReplicas[node]
-		loadRatio := float64(count) / avgLoad
-
-		var newReplicas int
-		if loadRatio > 1 {
-			// 负载过高，减少虚拟节点
-			newReplicas = int(float64(currentReplicas) / loadRatio)
-		} else {
-			// 负载过低，增加虚拟节点
-			newReplicas = int(float64(currentReplicas) * (2 - loadRatio))
-		}
-
-		// 确保在限制范围内
-		if newReplicas < m.config.MinReplicas {
-			newReplicas = m.config.MinReplicas
-		}
-		if newReplicas > m.config.MaxReplicas {
-			newReplicas = m.config.MaxReplicas
-		}
-
-		if newReplicas != currentReplicas {
-			// 重新添加节点的虚拟节点
-			if err := m.Remove(node); err != nil {
-				continue // 如果移除失败，跳过这个节点
-			}
-			m.addNode(node, newReplicas)
-		}
-	}
-
-	// 重置计数器
-	for node := range m.nodeCounts {
-		m.nodeCounts[node] = 0
-	}
-	atomic.StoreInt64(&m.totalRequests, 0)
-
-	// 重新排序
-	sort.Ints(m.keys)
-}
-
-
-
-// GetStats 获取负载统计信息
-func (m *Map) GetStats() map[string]float64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	stats := make(map[string]float64)
-	total := atomic.LoadInt64(&m.totalRequests)
-	if total == 0 {
-		return stats
-	}
-
-	for node, count := range m.nodeCounts {
-		stats[node] = float64(count) / float64(total)
-	}
-	return stats
-}
-
-// 将checkAndRebalance移到单独的goroutine中
-func (m *Map) startBalancer() {
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			m.checkAndRebalance()
-		}
-	}()
 }

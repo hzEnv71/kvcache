@@ -185,13 +185,13 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	}
 
 	if !isSelf {
-		value, err := g.getFromPeer(ctx, peer, key)
+		bytes, err := peer.Get(g.name, key) ///远端owner节点获取数据
 		if err != nil {
 			atomic.AddInt64(&g.stats.peerMisses, 1)
-			return ByteView{}, err // 远端 owner 读取失败，直接把错误返回给上层。
+			return ByteView{}, fmt.Errorf("failed to get from peer: %w", err) // 远端 owner 读取失败，直接把错误返回给上层。
 		}
 		atomic.AddInt64(&g.stats.peerHits, 1)
-		return value, nil // 远端 owner 成功返回，当前节点不再做本地兜底。
+		return ByteView{b: bytes}, nil // 远端 owner 成功返回，当前节点不再做本地兜底。
 	}
 
 	view, ok := g.mainCache.Get(ctx, key)
@@ -202,6 +202,49 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 
 	atomic.AddInt64(&g.stats.localMisses, 1)
 	return g.load(ctx, key) // owner 是本机但本地 miss，回源 getter。
+}
+
+// load 加载数据
+func (g *Group) load(ctx context.Context, key string) (value ByteView, err error) {
+	// 使用 singleflight 确保并发请求只加载一次
+	startTime := time.Now()
+	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		return g.loadData(ctx, key)
+	})
+
+	// 记录加载时间
+	loadDuration := time.Since(startTime).Nanoseconds()
+	atomic.AddInt64(&g.stats.loadDuration, loadDuration)
+	atomic.AddInt64(&g.stats.loads, 1)
+
+	if err != nil {
+		atomic.AddInt64(&g.stats.loaderErrors, 1)
+		return ByteView{}, err
+	}
+
+	view := viewi.(ByteView)
+
+	// 设置到本地缓存
+	if g.expiration > 0 {
+		g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
+	} else {
+		g.mainCache.Add(key, view)
+	}
+
+	return view, nil
+}
+
+// loadData 实际加载数据的方法
+func (g *Group) loadData(ctx context.Context, key string) (value ByteView, err error) {
+	// owner-only 模式下：这里不再尝试转发到其他 peer
+	// 只允许走本地 getter 回源
+	bytes, err := g.getter.Get(ctx, key) //目前是做空处理 打印找不到日志 后面可以扩展成从数据库中获取
+	if err != nil {
+		return ByteView{}, fmt.Errorf("failed to get data: %w", err)
+	}
+
+	atomic.AddInt64(&g.stats.loaderHits, 1)
+	return ByteView{b: cloneBytes(bytes)}, nil
 }
 
 // Set 设置缓存值。
@@ -373,58 +416,6 @@ func (g *Group) Close() error {
 
 	logrus.Infof("[KVCache] closed cache group [%s]", g.name)
 	return nil
-}
-
-// load 加载数据
-func (g *Group) load(ctx context.Context, key string) (value ByteView, err error) {
-	// 使用 singleflight 确保并发请求只加载一次
-	startTime := time.Now()
-	viewi, err := g.loader.Do(key, func() (interface{}, error) {
-		return g.loadData(ctx, key)
-	})
-
-	// 记录加载时间
-	loadDuration := time.Since(startTime).Nanoseconds()
-	atomic.AddInt64(&g.stats.loadDuration, loadDuration)
-	atomic.AddInt64(&g.stats.loads, 1)
-
-	if err != nil {
-		atomic.AddInt64(&g.stats.loaderErrors, 1)
-		return ByteView{}, err
-	}
-
-	view := viewi.(ByteView)
-
-	// 设置到本地缓存
-	if g.expiration > 0 {
-		g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
-	} else {
-		g.mainCache.Add(key, view)
-	}
-
-	return view, nil
-}
-
-// loadData 实际加载数据的方法
-func (g *Group) loadData(ctx context.Context, key string) (value ByteView, err error) {
-	// owner-only 模式下：这里不再尝试转发到其他 peer
-	// 只允许走本地 getter 回源
-	bytes, err := g.getter.Get(ctx, key) //目前是做空处理 打印找不到日志 后面可以扩展成从数据库中获取
-	if err != nil {
-		return ByteView{}, fmt.Errorf("failed to get data: %w", err)
-	}
-
-	atomic.AddInt64(&g.stats.loaderHits, 1)
-	return ByteView{b: cloneBytes(bytes)}, nil
-}
-
-// getFromPeer 从其他节点获取数据
-func (g *Group) getFromPeer(ctx context.Context, peer Peer, key string) (ByteView, error) {
-	bytes, err := peer.Get(g.name, key)
-	if err != nil {
-		return ByteView{}, fmt.Errorf("failed to get from peer: %w", err)
-	}
-	return ByteView{b: bytes}, nil
 }
 
 // RegisterPeers 注册PeerPicker

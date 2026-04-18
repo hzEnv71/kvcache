@@ -148,7 +148,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to listen: %v", err)
 	}
 
-	stopCh := make(chan error)
+	stopCh := make(chan error)//停止信号通道
 	go func() {
 		if err := etcd.Register(s.svcName, s.addr, stopCh); err != nil { //注册服务到etcd
 			logrus.Errorf("failed to register service: %v", err)
