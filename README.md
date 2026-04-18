@@ -169,8 +169,8 @@ go test ./cmd/...
 
 ## 9. 文档
 
-- 学习文档：`study.md`
-- 主要工作说明：`mainwork.md`
+- 学习文档：`learn.md`
+- 主要工作说明：`study.md`
 
 ---
 
