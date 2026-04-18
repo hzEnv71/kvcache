@@ -243,16 +243,6 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 		return nil
 	}
 
-	if g.peers == nil { //单机模式
-		view := ByteView{b: cloneBytes(value)}
-		if g.expiration > 0 {
-			g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
-		} else {
-			g.mainCache.Add(key, view)
-		}
-		return nil
-	}
-
 	handled, err := g.routeToOwner("set", key, value) // 路由到 owner；若 handled=true，说明已经由远端 owner 处理完成。
 	if err != nil {
 		return err
@@ -299,11 +289,6 @@ func (g *Group) Delete(ctx context.Context, key string) error {
 	if isFromPeer(ctx) {
 		g.mainCache.Delete(key)
 		return nil // peer 转发请求已经到达 owner，本地直接删除即可。
-	}
-
-	if g.peers == nil {
-		g.mainCache.Delete(key)
-		return nil // 单机模式下：没有 peers，就直接本地删除。
 	}
 
 	handled, err := g.routeToOwner("delete", key, nil) // 路由到 owner；若 handled=true，说明已经由远端 owner 处理完成。
