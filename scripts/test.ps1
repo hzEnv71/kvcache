@@ -1,7 +1,8 @@
 param(
   [string]$Etcd = "127.0.0.1:2379",
   [string]$Svc = "kv-cache",
-  [string]$Group = "test"
+  [string]$Group = "test",
+  [string]$Expiration = "10s"
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,11 +60,11 @@ if ($LASTEXITCODE -ne 0) { throw "build cmd/client failed" }
 
 Write-Host "[2/7] Start 3 servers (same as manual order)..."
 $procs = @()
-$procs += Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/server", "--addr", "127.0.0.1:8001", "--svc", $Svc, "--group", $Group, "--etcd", $Etcd) -PassThru
+$procs += Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/server", "--addr", "127.0.0.1:8001", "--svc", $Svc, "--group", $Group, "--etcd", $Etcd, "--expiration", $Expiration) -PassThru
 Start-Sleep -Milliseconds 800
-$procs += Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/server", "--addr", "127.0.0.1:8002", "--svc", $Svc, "--group", $Group, "--etcd", $Etcd) -PassThru
+$procs += Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/server", "--addr", "127.0.0.1:8002", "--svc", $Svc, "--group", $Group, "--etcd", $Etcd, "--expiration", $Expiration) -PassThru
 Start-Sleep -Milliseconds 800
-$procs += Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/server", "--addr", "127.0.0.1:8003", "--svc", $Svc, "--group", $Group, "--etcd", $Etcd) -PassThru
+$procs += Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/server", "--addr", "127.0.0.1:8003", "--svc", $Svc, "--group", $Group, "--etcd", $Etcd, "--expiration", $Expiration) -PassThru
 
 try {
   Write-Host "[3/7] Wait ports ready..."

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -60,15 +61,32 @@ func main() {
 	group.RegisterPeers(picker) //注册节点选择器到缓存组
 
 	fmt.Printf("server starting addr=%s svc=%s group=%s etcd=%v\n", *addr, *svc, *groupName, etcdEndpoints)
-	// 延迟打印 ring，方便观察服务发现是否收敛
-	go func() {
-		time.Sleep(3 * time.Second)
-		picker.PrintPeers()
-		picker.PrintRingState("k1")
-		time.Sleep(10 * time.Second)
-		picker.PrintPeers()
-		picker.PrintRingState("k1")
-	}()
+	// 退出前把 group stats 写入按节点区分的日志文件
+	writeStatusLog := func() {
+		if err := os.MkdirAll("log", 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "create log dir failed: %v\n", err)
+			return
+		}
+		stats := group.Stats()
+		stats["expiration"] = (*expiration).String()
+		safeAddr := strings.ReplaceAll(*addr, ":", "-")
+		payload := map[string]interface{}{
+			"time":  time.Now().Format(time.RFC3339),
+			"addr":  *addr,
+			"svc":   *svc,
+			"group": *groupName,
+			"stats": stats,
+		}
+		data, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "marshal status log failed: %v\n", err)
+			return
+		}
+		path := fmt.Sprintf("log/status-%s.log", safeAddr)
+		if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "write status log failed: %v\n", err)
+		}
+	}
 	//异步启动服务器
 	go func() {
 		if err := srv.Start(); err != nil {
@@ -82,6 +100,7 @@ func main() {
 	<-sigCh
 	//关闭节点选择器和服务器
 	fmt.Println("shutting down server...")
+	writeStatusLog()
 	_ = picker.Close()
 	srv.Stop()
 }

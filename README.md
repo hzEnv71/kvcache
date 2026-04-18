@@ -83,19 +83,24 @@
 分别在 3 个终端执行：
 
 ```bash
-go run ./cmd/server --addr 127.0.0.1:8001 --svc kv-cache --group test --etcd 127.0.0.1:2379
-go run ./cmd/server --addr 127.0.0.1:8002 --svc kv-cache --group test --etcd 127.0.0.1:2379
-go run ./cmd/server --addr 127.0.0.1:8003 --svc kv-cache --group test --etcd 127.0.0.1:2379
+go run ./cmd/server --addr 127.0.0.1:8001 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
+go run ./cmd/server --addr 127.0.0.1:8002 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
+go run ./cmd/server --addr 127.0.0.1:8003 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
 ```
 
 ### 4.3 客户端读写验证
 
 ```bash
 go run ./cmd/client --op set --addr 127.0.0.1:8001 --group test --key k1 --value v1 --timeout 20s
-go run ./cmd/client --op get --addr 127.0.0.1:8001 --group test --key k1 --value v1 --timeout 20s
-go run ./cmd/client --op get --addr 127.0.0.1:8002 --group test --key k1 --value v1 --timeout 20s
-go run ./cmd/client --op get --addr 127.0.0.1:8003 --group test --key k1 --value v1 --timeout 20s
+go run ./cmd/client --op set --addr 127.0.0.1:8002 --group test --key k2 --value v2 --timeout 20s
+go run ./cmd/client --op set --addr 127.0.0.1:8003 --group test --key k3 --value v3 --timeout 20s
+go run ./cmd/client --op get --addr 127.0.0.1:8001 --group test --key k1  --timeout 20s
+go run ./cmd/client --op get --addr 127.0.0.1:8002 --group test --key k2  --timeout 20s
+go run ./cmd/client --op get --addr 127.0.0.1:8003 --group test --key k3  --timeout 20s
 go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k1 --timeout 20s
+go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k2 --timeout 20s
+go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k3 --timeout 20s
+
 ```
 
 ### 4.4 脚本快速验证（PowerShell）
