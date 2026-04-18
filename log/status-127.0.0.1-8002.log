@@ -14,9 +14,9 @@
     "local_hits": 0,
     "local_misses": 0,
     "name": "test",
-    "peer_hits": 2,
-    "peer_misses": 0
+    "peer_hits": 3,
+    "peer_misses": 8
   },
   "svc": "kv-cache",
-  "time": "2026-04-18T11:47:29+08:00"
+  "time": "2026-04-18T12:05:06+08:00"
 }

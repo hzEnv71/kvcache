@@ -4,22 +4,22 @@
   "stats": {
     "cache_closed": false,
     "cache_hit_rate": 1,
-    "cache_hits": 3,
+    "cache_hits": 1,
     "cache_initialized": true,
     "cache_misses": 0,
-    "cache_size": 0,
+    "cache_size": 1,
     "closed": false,
     "expiration": "10s",
     "hit_rate": 1,
     "loader_errors": 0,
     "loader_hits": 0,
     "loads": 0,
-    "local_hits": 3,
+    "local_hits": 1,
     "local_misses": 0,
     "name": "test",
     "peer_hits": 0,
     "peer_misses": 0
   },
   "svc": "kv-cache",
-  "time": "2026-04-18T11:46:27+08:00"
+  "time": "2026-04-18T12:05:57+08:00"
 }

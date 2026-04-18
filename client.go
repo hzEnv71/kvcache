@@ -48,7 +48,7 @@ func NewClient(addr string, svcName string, etcdCli *clientv3.Client) (*Client, 
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 		grpc.WithTimeout(10*time.Second),
-		grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
+		// grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial server: %v", err)

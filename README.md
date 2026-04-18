@@ -83,7 +83,7 @@
 分别在 3 个终端执行：
 
 ```bash
-go run ./cmd/server --addr 127.0.0.1:8001 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
+go run ./cmd/server --addr 127.0.0.1:8003 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
 go run ./cmd/server --addr 127.0.0.1:8002 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
 go run ./cmd/server --addr 127.0.0.1:8003 --svc kv-cache --group test --etcd 127.0.0.1:2379 --expiration 30s
 ```

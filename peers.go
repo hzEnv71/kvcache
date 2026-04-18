@@ -175,7 +175,7 @@ func (p *ClientPicker) fetchAllServices() error {
 func (p *ClientPicker) watchServiceChanges() {
 	watcher := clientv3.NewWatcher(p.etcdCli)
 	defer watcher.Close()
-	watchChan := watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix())
+	watchChan := watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix(), clientv3.WithPrevKV())
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -183,12 +183,12 @@ func (p *ClientPicker) watchServiceChanges() {
 		case resp, ok := <-watchChan:
 			if !ok {
 				time.Sleep(time.Second)
-				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix())
+				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix(), clientv3.WithPrevKV())
 				continue
 			}
 			if resp.Err() != nil {
 				time.Sleep(time.Second)
-				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix())
+				watchChan = watcher.Watch(p.ctx, "/services/"+p.svcName, clientv3.WithPrefix(), clientv3.WithPrevKV())
 				continue
 			}
 			p.handleWatchEvents(resp.Events)
@@ -209,6 +209,9 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 
 	for _, event := range events {
 		addr := string(event.Kv.Value)
+		if event.Type == clientv3.EventTypeDelete {
+			addr = string(event.PrevKv.Value)
+		}
 		if addr == "" {
 			continue
 		}
