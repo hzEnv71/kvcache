@@ -233,33 +233,32 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 		return ErrValueRequired
 	}
 
-	if isFromPeer(ctx) {
+	if isFromPeer(ctx) { //本地是owner节点
 		view := ByteView{b: cloneBytes(value)}
 		if g.expiration > 0 {
 			g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
 		} else {
 			g.mainCache.Add(key, view)
 		}
-		return nil // peer 转发请求已经到达 owner，本地直接写入即可。
+		return nil
 	}
 
-	if g.peers == nil {
+	if g.peers == nil { //单机模式
 		view := ByteView{b: cloneBytes(value)}
 		if g.expiration > 0 {
 			g.mainCache.AddWithExpiration(key, view, time.Now().Add(g.expiration))
 		} else {
 			g.mainCache.Add(key, view)
 		}
-		return nil // 单机模式下：没有 peers，就直接本地写入。
+		return nil
 	}
 
-	if err := g.routeToOwner("set", key, value); err != nil {
-		return err // owner 不可用或远端写失败，直接返回错误。
+	handled, err := g.routeToOwner("set", key, value) // 路由到 owner；若 handled=true，说明已经由远端 owner 处理完成。
+	if err != nil {
+		return err
 	}
-	if g.peers != nil {
-		if _, _, isSelf := g.peers.PickPeer(key); !isSelf {
-			return nil // 非 owner 节点已成功转发到 owner，当前节点不再本地落副本。
-		}
+	if handled {
+		return nil // 非 owner 节点已成功转发到 owner，当前节点不再本地落副本。
 	}
 
 	view := ByteView{b: cloneBytes(value)}
@@ -307,27 +306,27 @@ func (g *Group) Delete(ctx context.Context, key string) error {
 		return nil // 单机模式下：没有 peers，就直接本地删除。
 	}
 
-	if err := g.routeToOwner("delete", key, nil); err != nil {
+	handled, err := g.routeToOwner("delete", key, nil) // 路由到 owner；若 handled=true，说明已经由远端 owner 处理完成。
+	if err != nil {
 		return err // owner 不可用或远端删除失败，直接返回错误。
 	}
-	if g.peers != nil {
-		if _, _, isSelf := g.peers.PickPeer(key); !isSelf {
-			return nil // 非 owner 节点已成功转发到 owner，当前节点不再本地删除副本。
-		}
+	if handled {
+		return nil // 非 owner 节点已成功转发到 owner，当前节点不再本地删除副本。
 	}
 
 	g.mainCache.Delete(key)
 	return nil // owner 是本机，直接删除本地缓存。
 }
 
-// syncToPeers 根据 key 找到 owner，并在当前节点不是 owner 时负责转发。
+// routeToOwner 根据 key 找到 owner，并在当前节点不是 owner 时负责转发。
 //
 // 返回值语义：
-// - nil：说明要么 owner 是本机（当前函数无需转发），要么远端转发成功；
+// - handled=true：说明请求已经由远端 owner 处理完成，调用方应直接返回；
+// - handled=false：说明 owner 是本机，调用方继续执行本地写/删逻辑；
 // - error：说明 owner 不可用，或远端 RPC 失败。
-func (g *Group) routeToOwner(op string, key string, value []byte) error {
+func (g *Group) routeToOwner(op string, key string, value []byte) (handled bool, err error) {
 	if g.peers == nil {
-		return nil // 单机模式下没有 peers，不需要做任何转发。
+		return false, nil // 单机模式下没有 peers，不需要做任何转发。
 	}
 
 	peer, ok, isSelf := g.peers.PickPeer(key)
@@ -335,10 +334,10 @@ func (g *Group) routeToOwner(op string, key string, value []byte) error {
 		picker.PrintRingState(key)
 	}
 	if !ok {
-		return fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接返回错误。
+		return false, fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接返回错误。
 	}
 	if isSelf {
-		return nil // owner 就是本机，调用方继续执行本地写/删逻辑。
+		return false, nil // owner 就是本机，调用方继续执行本地写/删逻辑。
 	}
 
 	syncCtx := peerContext(context.Background())
@@ -346,17 +345,17 @@ func (g *Group) routeToOwner(op string, key string, value []byte) error {
 	switch op {
 	case "set":
 		if err := peer.Set(syncCtx, g.name, key, value); err != nil {
-			return fmt.Errorf("failed to set to owner peer: %w", err) // 远端写失败，原样返回错误。
+			return false, fmt.Errorf("failed to set to owner peer: %w", err) // 远端写失败，原样返回错误。
 		}
 	case "delete":
 		if _, err := peer.Delete(syncCtx, g.name, key); err != nil {
-			return fmt.Errorf("failed to delete from owner peer: %w", err) // 远端删除失败，原样返回错误。
+			return false, fmt.Errorf("failed to delete from owner peer: %w", err) // 远端删除失败，原样返回错误。
 		}
 	default:
-		return fmt.Errorf("unsupported sync op: %s", op)
+		return false, fmt.Errorf("unsupported sync op: %s", op)
 	}
 
-	return nil // 远端 owner 操作成功，当前节点无需继续本地执行。
+	return true, nil // 远端 owner 操作成功，当前节点无需继续本地执行。
 }
 
 // Clear 清空缓存
