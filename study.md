@@ -102,8 +102,8 @@ KVCache 对应做法：
 
 关键行为：
 
-- `Get`：本地命中 -> 按一致性哈希找 owner -> owner 读取或回源
-- `Set/Delete`：先本地执行，再异步同步到 owner（最终一致）
+- `Get`：先 `PickPeer(key)` 找 owner；owner 是远端就直接转发，owner 是本机才查本地缓存并回源
+- `Set/Delete`：先 `PickPeer(key)` 找 owner；owner 是远端就直接转发，owner 是本机才本地执行
 - `Stats`：暴露命中率和加载统计
 
 ---
@@ -133,7 +133,7 @@ KVCache 对应做法：
 
 ## 5.4 PeerPicker / Peer（分布式抽象）
 
-- `PeerPicker`：给定 key 选一个节点
+- `PeerPicker`：给定 key 选一个节点（owner）
 - `Peer`：对选中的节点执行 `Get/Set/Delete`
 
 当前实现：
@@ -143,6 +143,11 @@ KVCache 对应做法：
 - 用一致性哈希做 key 路由
 - 用 gRPC 做节点通信
 
+严格 owner-only 语义下：
+- owner 是远端 -> 直接转发
+- owner 是本机 -> 直接本地执行
+- owner 节点 miss 后只回源 getter，不再继续找别的 peer
+
 ---
 
 ## 6. 关键执行流程（一定要掌握）
@@ -150,40 +155,54 @@ KVCache 对应做法：
 ## 6.1 `Get` 流程（最重要）
 
 1. 调用 `Group.Get(ctx, key)`
-2. 先查 `mainCache.Get`
-3. 命中：直接返回
-4. 未命中：进入 `load`
-5. `singleflight.Do(key, fn)` 合并并发 miss
-6. `loadData`：
-  - 先 `PickPeer(key)` 选 owner
-  - owner 是远端：走 gRPC `peer.Get`
-  - owner 是本机：回源 `getter.Get`
-7. 拿到结果后写回本地缓存
-8. 返回结果
+2. 如果 `peers == nil`：退化成单机模式
+   - 先查 `mainCache.Get`
+   - miss 再 `g.load(ctx, key)` 回源
+3. 如果启用了 peers：
+   - 先 `PickPeer(key)` 找 owner
+   - owner 是远端：直接 `peer.Get(group, key)`
+   - owner 是本机：先查 `mainCache.Get`
+   - 本机 miss 后只会走 `getter.Get` 回源，不会继续找别的 peer
+4. `load()` 内部使用 `singleflight` 合并并发 miss
+5. 拿到结果后写回本地缓存
+6. 返回结果
 
-这条链路是“owner 优先”的一致性路由，不再做随意回退。
+这条链路是“严格 owner-only”的一致性路由：
+- 非 owner 只负责转发
+- owner 负责真正处理
+- owner 节点 miss 后只回源 getter，不再继续找别的节点
 
 ---
 
 ## 6.2 `Set` 流程（当前实现）
 
 1. `Group.Set`
-2. 先写本地缓存（支持 TTL）
-3. 如果不是 peer 转发请求（无 `from_peer`）且开启了 peers：
-  - 异步 `syncToPeers("set")` 同步到 owner
+2. 如果请求已经带 `from_peer=true`：
+   - 说明这是 owner 收到的转发请求，直接本地写
+3. 如果 `peers == nil`：
+   - 单机模式，直接本地写
+4. 如果启用了 peers：
+   - 先 `PickPeer(key)` 找 owner
+   - owner 是远端：直接通过 gRPC 转发给 owner，并把 `from_peer=true` 写入 metadata
+   - owner 是本机：直接本地写
 
-说明：这是“本地先写 + 异步同步”的最终一致语义，返回成功不代表远端一定已完成。
+说明：这是严格 owner-only 写路径，非 owner 不保存业务副本。
 
 ---
 
 ## 6.3 `Delete` 流程（当前实现）
 
-与 `Set` 对齐：
+1. `Group.Delete(ctx, key)` 进入后先检查关闭状态和 key 合法性
+2. 如果请求已经带 `from_peer=true`：
+   - 说明这是 owner 收到的转发删除请求，直接本地删
+3. 如果 `peers == nil`：
+   - 单机模式，直接本地删
+4. 如果启用了 peers：
+   - 先 `PickPeer(key)` 找 owner
+   - owner 是远端：直接通过 gRPC 转发给 owner，并把 `from_peer=true` 写入 metadata
+   - owner 是本机：直接本地删
 
-1. 先删本地缓存
-2. 非 peer 请求时异步 `syncToPeers("delete")`
-
-说明：删除链路同样是最终一致模型。
+说明：删除链路也是严格 owner-only，不会同时删多份副本。
 
 ---
 

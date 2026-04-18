@@ -237,22 +237,25 @@ group.Get(ctx, req.Key)
 - `g.closed` 是否已关闭
 - `key` 是否为空
 
-#### 第 2 层：先查本地缓存
+#### 第 2 层：判断是否启用了 peers
 
-- 调 `g.mainCache.Get(ctx, key)`
-- 命中则直接返回
+- 如果 `peers == nil`：
+  - 退化成单机模式
+  - 先查本地缓存
+  - miss 后直接走 `load(ctx, key)` 回源
 
-#### 第 3 层：miss 后进入 `load`
+#### 第 3 层：启用了 peers 后，先找 owner
 
-- 通过 `singleflight` 合并并发 miss
-- 避免多个请求同时回源
+- 调 `PickPeer(key)` 先算 owner
+- owner 是远端：直接 `peer.Get(group, key)`
+- owner 是本机：先查本地缓存
+- 本机缓存 miss 后再走 `load(ctx, key)`
 
-#### 第 4 层：`loadData`
+#### 第 4 层：`load` / `loadData`
 
-- 如果启用 peers：
-  - `PickPeer(key)` 找 owner
-  - owner 是远端：走远端 `peer.Get(...)`
-  - owner 是本机：调用本地 `getter.Get(...)`
+- `load` 用 `singleflight` 合并并发 miss
+- `loadData` 只走本地 `getter.Get(ctx, key)` 回源
+- 不再继续转发到其他 peer
 - 拿到数据后写回本地缓存
 
 ---
@@ -265,19 +268,18 @@ server.go:Get
    ▼
 group.go:Get
    │
-   ├─ mainCache.Get(ctx, key)
-   │    ├─ cache.go -> store.Get
-   │    └─ 命中则直接返回
+   ├─ if peers == nil -> 单机模式：本地缓存 miss 后直接 load
+   │
+   ├─ peers != nil -> 先 PickPeer(key)
+   │    ├─ owner 是远端：直接 peer.Get(group, key)
+   │    └─ owner 是本机：先查 mainCache.Get
+   │         ├─ 命中：直接返回
+   │         └─ miss：调用 load(ctx, key)
    │
    └─ load(ctx, key)
-        │
         ├─ singleflight.Group.Do(key, fn)
-        │     └─ loadData(ctx, key)
-        │          ├─ peers.PickPeer(key)
-        │          ├─ 若 owner 为远端：peer.Get(group, key)
-        │          └─ 若 owner 为本机：getter.Get(ctx, key)
-        │
-        └─ load 结果写回 mainCache
+        └─ loadData(ctx, key)
+             └─ 只走 getter.Get(ctx, key) 回源，不再继续找其他 peer
 ```
 
 ---
@@ -305,14 +307,18 @@ client -> server.go:Set -> group.go:Set
 
 `group.Set` 当前的语义是：
 
-1. 判断是否来自 peer 转发（通过 gRPC metadata 中的 `from_peer=true`）
-2. 先按 owner 路由
-3. owner 是远端：把 `from_peer=true` 继续通过 metadata 传给远端
-4. owner 是本机：直接写本地缓存
+1. 如果 metadata 中已经有 `from_peer=true`，说明这是 owner 收到的转发请求：
+   - 直接本地写，不再继续路由
+2. 如果还没启用 peers：
+   - 直接本地写
+3. 如果启用了 peers：
+   - 先 `PickPeer(key)` 找 owner
+   - owner 是远端：通过 gRPC 转发给 owner，并把 `from_peer=true` 放进 metadata
+   - owner 是本机：直接写本地缓存
 
 所以它是：
 
-> **先路由到 owner，再由 owner 完成写入**
+> **严格 owner-only 的写入：非 owner 只负责转发，owner 负责真正写入。**
 
 ---
 
@@ -320,14 +326,20 @@ client -> server.go:Set -> group.go:Set
 
 `Delete` 与 `Set` 类似：
 
-1. 先判断是否为 peer 转发请求（通过 gRPC metadata）
-2. 再按 owner 路由到目标节点
-3. owner 是远端：把 `from_peer=true` 继续传给远端
-4. owner 是本机：直接删本地缓存
+1. 如果 metadata 中已经有 `from_peer=true`：
+   - 说明这是 owner 收到的转发删除请求，直接本地删
+2. 如果还没启用 peers：
+   - 直接本地删
+3. 如果启用了 peers：
+   - 先 `PickPeer(key)` 找 owner
+   - owner 是远端：通过 gRPC 转发给 owner，并把 `from_peer=true` 放进 metadata
+   - owner 是本机：直接删除本地缓存
 
 ---
 
 ### 5.3 `syncToPeers(...)` 做了什么
+
+> 说明：当前版本里 `Set/Delete` 已经是 owner-only 主流程，`syncToPeers` 只保留为兼容占位，不再作为主路径使用。
 
 ```text
 group.go:Set/Delete

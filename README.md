@@ -93,6 +93,8 @@ go run ./cmd/server --addr 127.0.0.1:8003 --svc kv-cache --group test --etcd 127
 ```bash
 go run ./cmd/client --op set --addr 127.0.0.1:8001 --group test --key k1 --value v1 --timeout 20s
 go run ./cmd/client --op get --addr 127.0.0.1:8001 --group test --key k1 --value v1 --timeout 20s
+go run ./cmd/client --op get --addr 127.0.0.1:8002 --group test --key k1 --value v1 --timeout 20s
+go run ./cmd/client --op get --addr 127.0.0.1:8003 --group test --key k1 --value v1 --timeout 20s
 go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k1 --timeout 20s
 ```
 

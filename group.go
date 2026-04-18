@@ -148,13 +148,15 @@ func GetGroup(name string) *Group {
 // 1. 检查 group 是否已关闭；关闭则直接返回错误。
 // 2. 检查 key 是否为空；为空则直接返回错误。
 // 3. 如果还没启用 peers（单机模式）：
-//    - 先查本地缓存；
-//    - 命中则直接返回；
-//    - miss 则调用 g.load(ctx, key) 回源。
+//   - 先查本地缓存；
+//   - 命中则直接返回；
+//   - miss 则调用 g.load(ctx, key) 回源。
+//
 // 4. 如果启用了 peers：
-//    - 先通过一致性哈希 PickPeer(key) 找 owner；
-//    - 如果 owner 是远端：直接调用 g.getFromPeer 去远端取；
-//    - 如果 owner 是本机：先查本地缓存，miss 后调用 g.load 回源。
+//   - 先通过一致性哈希 PickPeer(key) 找 owner；
+//   - 如果 owner 是远端：直接调用 g.getFromPeer 去远端取；
+//   - 如果 owner 是本机：先查本地缓存，miss 后调用 g.load 回源。
+//
 // 5. 整个过程中会统计 localHits/localMisses/peerHits/peerMisses。
 func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	if atomic.LoadInt32(&g.closed) == 1 {
@@ -208,14 +210,17 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 // 1. 检查 group 是否已关闭；关闭则直接返回错误。
 // 2. 检查 key/value 是否有效；无效则直接返回错误。
 // 3. 如果请求是 peer 转发来的（metadata 中有 from_peer=true）：
-//    - 说明这已经是 owner 节点收到的二次请求；
-//    - 直接在当前节点本地缓存写入，不再继续路由。
+//   - 说明这已经是 owner 节点收到的二次请求；
+//   - 直接在当前节点本地缓存写入，不再继续路由。
+//
 // 4. 如果还没启用 peers（单机模式）：
-//    - 直接在本地缓存写入。
+//   - 直接在本地缓存写入。
+//
 // 5. 如果启用了 peers：
-//    - 先通过一致性哈希找到 owner；
-//    - 如果 owner 是远端：用 g.peers 返回的 client 直接转发到 owner；
-//    - 如果 owner 是本机：直接写当前节点本地缓存。
+//   - 先通过一致性哈希找到 owner；
+//   - 如果 owner 是远端：用 g.peers 返回的 client 直接转发到 owner；
+//   - 如果 owner 是本机：直接写当前节点本地缓存。
+//
 // 6. 整个过程中不会在非 owner 节点留下业务数据副本。
 func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 	if atomic.LoadInt32(&g.closed) == 1 {
@@ -248,20 +253,13 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 		return nil // 单机模式下：没有 peers，就直接本地写入。
 	}
 
-	peer, ok, isSelf := g.peers.PickPeer(key)
-	if picker, ok2 := g.peers.(*ClientPicker); ok2 {
-		picker.PrintRingState(key)
+	if err := g.routeToOwner("set", key, value); err != nil {
+		return err // owner 不可用或远端写失败，直接返回错误。
 	}
-	if !ok {
-		return fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接报错。
-	}
-
-	if !isSelf { // 本节点不是 owner，直接转发给 owner，不在本地落副本。
-		syncCtx := peerContext(context.Background())
-		if err := peer.Set(syncCtx, g.name, key, value); err != nil {
-			return fmt.Errorf("failed to set to owner peer: %w", err) // 远端写失败，原样返回错误。
+	if g.peers != nil {
+		if _, _, isSelf := g.peers.PickPeer(key); !isSelf {
+			return nil // 非 owner 节点已成功转发到 owner，当前节点不再本地落副本。
 		}
-		return nil // 远端 owner 写成功，当前节点结束。
 	}
 
 	view := ByteView{b: cloneBytes(value)}
@@ -279,14 +277,17 @@ func (g *Group) Set(ctx context.Context, key string, value []byte) error {
 // 1. 检查 group 是否已关闭；关闭则直接返回错误。
 // 2. 检查 key 是否为空；为空则直接返回错误。
 // 3. 如果请求是 peer 转发来的（metadata 中有 from_peer=true）：
-//    - 说明这已经是 owner 节点收到的二次请求；
-//    - 直接在当前节点本地删除，不再继续路由。
+//   - 说明这已经是 owner 节点收到的二次请求；
+//   - 直接在当前节点本地删除，不再继续路由。
+//
 // 4. 如果还没启用 peers（单机模式）：
-//    - 直接在本地缓存删除。
+//   - 直接在本地缓存删除。
+//
 // 5. 如果启用了 peers：
-//    - 先通过一致性哈希找到 owner；
-//    - 如果 owner 是远端：用 g.peers 返回的 client 直接转发到 owner；
-//    - 如果 owner 是本机：直接删当前节点本地缓存。
+//   - 先通过一致性哈希找到 owner；
+//   - 如果 owner 是远端：用 g.peers 返回的 client 直接转发到 owner；
+//   - 如果 owner 是本机：直接删当前节点本地缓存。
+//
 // 6. 整个过程中不会尝试同时删多份副本，因为当前模型是严格 owner-only。
 func (g *Group) Delete(ctx context.Context, key string) error {
 	if atomic.LoadInt32(&g.closed) == 1 {
@@ -306,51 +307,56 @@ func (g *Group) Delete(ctx context.Context, key string) error {
 		return nil // 单机模式下：没有 peers，就直接本地删除。
 	}
 
-	peer, ok, isSelf := g.peers.PickPeer(key)
-	if picker, ok2 := g.peers.(*ClientPicker); ok2 {
-		picker.PrintRingState(key)
+	if err := g.routeToOwner("delete", key, nil); err != nil {
+		return err // owner 不可用或远端删除失败，直接返回错误。
 	}
-	if !ok {
-		return fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接报错。
-	}
-
-	if !isSelf { // 本节点不是 owner，直接转发给 owner，不在本地做删除副本。
-		syncCtx := peerContext(context.Background())
-		if _, err := peer.Delete(syncCtx, g.name, key); err != nil {
-			return fmt.Errorf("failed to delete from owner peer: %w", err) // 远端删除失败，原样返回。
+	if g.peers != nil {
+		if _, _, isSelf := g.peers.PickPeer(key); !isSelf {
+			return nil // 非 owner 节点已成功转发到 owner，当前节点不再本地删除副本。
 		}
-		return nil // 远端 owner 删除成功，当前节点结束。
 	}
 
 	g.mainCache.Delete(key)
 	return nil // owner 是本机，直接删除本地缓存。
 }
 
-// syncToPeers 旧的异步同步路径已不再作为主流程使用。
-// 当前 Set/Delete 直接路由 owner，因此这里保留为兼容占位。
-func (g *Group) syncToPeers(ctx context.Context, op string, key string, value []byte) {
+// syncToPeers 根据 key 找到 owner，并在当前节点不是 owner 时负责转发。
+//
+// 返回值语义：
+// - nil：说明要么 owner 是本机（当前函数无需转发），要么远端转发成功；
+// - error：说明 owner 不可用，或远端 RPC 失败。
+func (g *Group) routeToOwner(op string, key string, value []byte) error {
 	if g.peers == nil {
-		return
+		return nil // 单机模式下没有 peers，不需要做任何转发。
 	}
 
 	peer, ok, isSelf := g.peers.PickPeer(key)
-	if !ok || isSelf {
-		return
+	if picker, ok2 := g.peers.(*ClientPicker); ok2 {
+		picker.PrintRingState(key)
+	}
+	if !ok {
+		return fmt.Errorf("owner peer unavailable for key=%s", key) // 找不到 owner，直接返回错误。
+	}
+	if isSelf {
+		return nil // owner 就是本机，调用方继续执行本地写/删逻辑。
 	}
 
 	syncCtx := peerContext(context.Background())
 
-	var err error
 	switch op {
 	case "set":
-		err = peer.Set(syncCtx, g.name, key, value)
+		if err := peer.Set(syncCtx, g.name, key, value); err != nil {
+			return fmt.Errorf("failed to set to owner peer: %w", err) // 远端写失败，原样返回错误。
+		}
 	case "delete":
-		_, err = peer.Delete(syncCtx, g.name, key)
+		if _, err := peer.Delete(syncCtx, g.name, key); err != nil {
+			return fmt.Errorf("failed to delete from owner peer: %w", err) // 远端删除失败，原样返回错误。
+		}
+	default:
+		return fmt.Errorf("unsupported sync op: %s", op)
 	}
 
-	if err != nil {
-		logrus.Errorf("[KVCache] failed to sync %s to peer: %v", op, err)
-	}
+	return nil // 远端 owner 操作成功，当前节点无需继续本地执行。
 }
 
 // Clear 清空缓存
