@@ -67,15 +67,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "create log dir failed: %v\n", err)
 			return
 		}
-		stats := group.Stats()
-		stats["expiration"] = (*expiration).String()
+		stats := translateStatsToChinese(group.Stats(), (*expiration).String())
 		safeAddr := strings.ReplaceAll(*addr, ":", "-")
 		payload := map[string]interface{}{
-			"time":  time.Now().Format(time.RFC3339),
-			"addr":  *addr,
-			"svc":   *svc,
-			"group": *groupName,
-			"stats": stats,
+			"时间":   time.Now().Format(time.RFC3339),
+			"地址":   *addr,
+			"服务名": *svc,
+			"组名":   *groupName,
+			"统计信息": stats,
 		}
 		data, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {
@@ -115,4 +114,61 @@ func splitAndTrim(v string) []string {
 		}
 	}
 	return out
+}
+
+func translateStatsToChinese(stats map[string]interface{}, expiration string) map[string]interface{} {
+	cn := make(map[string]interface{}, len(stats)+1)
+	for k, v := range stats {
+		switch {
+		case k == "name":
+			cn["名称"] = v
+		case k == "closed":
+			cn["是否关闭"] = v
+		case k == "expiration":
+			cn["过期时间"] = v
+		case k == "loads":
+			cn["加载次数"] = v
+		case k == "local_hits":
+			cn["本地命中"] = v
+		case k == "local_misses":
+			cn["本地未命中"] = v
+		case k == "peer_hits":
+			cn["远端命中"] = v
+		case k == "peer_misses":
+			cn["远端未命中"] = v
+		case k == "loader_hits":
+			cn["回源命中"] = v
+		case k == "loader_errors":
+			cn["回源错误"] = v
+		case k == "hit_rate":
+			cn["命中率"] = v
+		case k == "avg_load_time_ms":
+			cn["平均加载耗时毫秒"] = v
+		case strings.HasPrefix(k, "cache_"):
+			cn[translateCacheStatKey(k)] = v
+		default:
+			cn[k] = v
+		}
+	}
+	cn["过期时间"] = expiration
+	return cn
+}
+
+func translateCacheStatKey(key string) string {
+	switch strings.TrimPrefix(key, "cache_") {
+	case "len":
+		return "缓存长度"
+	case "capacity":
+		return "缓存容量"
+	case "hits":
+		return "缓存命中"
+	case "misses":
+		return "缓存未命中"
+	case "evictions":
+		return "缓存淘汰"
+	case "expired":
+		return "缓存过期"
+	default:
+		return "缓存_" + strings.TrimPrefix(key, "cache_")
+	}
 }

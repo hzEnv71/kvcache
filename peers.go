@@ -98,8 +98,8 @@ func NewClientPicker(addr string, opts ...PickerOption) (*ClientPicker, error) {
 	picker := &ClientPicker{
 		selfAddr: addr,
 		svcName:  defaultSvcName,
-		clients:  make(map[string]*Client),
-		consHash: consistenthash.New(),
+		clients:  make(map[string]*Client), //初始化clients映射
+		consHash: consistenthash.New(),     //初始化一致性哈希环
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -158,9 +158,9 @@ func (p *ClientPicker) fetchAllServices() error {
 	for _, kv := range resp.Kvs { ///获取所有服务实例
 		addr := string(kv.Value)
 		if addr != "" {
-			p.addMember(addr)
+			p.addMember(addr) //将节点加入哈希环
 			if addr != p.selfAddr {
-				p.ensureClient(addr)
+				p.joinClient(addr) //为远端节点创建连接并缓存
 				logrus.Infof("Discovered service at %s", addr)
 			}
 		}
@@ -218,9 +218,9 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 
 		switch event.Type {
 		case clientv3.EventTypePut: //新增节点
-			p.addMember(addr)
-			if addr != p.selfAddr {
-				p.ensureClient(addr)
+			p.addMember(addr)       //加入哈希环 包括自己
+			if addr != p.selfAddr { //为远端节点创建连接并缓存
+				p.joinClient(addr)
 				logrus.Infof("New service discovered at %s", addr)
 			}
 		case clientv3.EventTypeDelete: //删除节点
@@ -242,7 +242,7 @@ func (p *ClientPicker) addMember(addr string) {
 }
 
 // ensureClient 为远端节点创建连接并缓存
-func (p *ClientPicker) ensureClient(addr string) {
+func (p *ClientPicker) joinClient(addr string) {
 	if _, exists := p.clients[addr]; exists {
 		return
 	}

@@ -1,25 +1,22 @@
 {
-  "addr": "127.0.0.1:8002",
-  "group": "test",
-  "stats": {
-    "cache_closed": false,
-    "cache_hit_rate": 1,
-    "cache_hits": 949,
-    "cache_initialized": true,
-    "cache_misses": 0,
-    "cache_size": 0,
-    "closed": false,
-    "expiration": "10s",
-    "hit_rate": 1,
-    "loader_errors": 0,
-    "loader_hits": 0,
-    "loads": 0,
-    "local_hits": 949,
-    "local_misses": 0,
-    "name": "test",
-    "peer_hits": 1,
-    "peer_misses": 0
-  },
-  "svc": "kv-cache",
-  "time": "2026-04-18T17:59:10+08:00"
+  "地址": "127.0.0.1:8002",
+  "时间": "2026-04-18T18:27:46+08:00",
+  "服务名": "kv-cache",
+  "组名": "test",
+  "统计信息": {
+    "加载次数": 0,
+    "名称": "test",
+    "回源命中": 0,
+    "回源错误": 0,
+    "是否关闭": false,
+    "本地命中": 0,
+    "本地未命中": 0,
+    "缓存_closed": false,
+    "缓存_initialized": false,
+    "缓存命中": 0,
+    "缓存未命中": 0,
+    "过期时间": "10s",
+    "远端命中": 1,
+    "远端未命中": 0
+  }
 }
