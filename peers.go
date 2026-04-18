@@ -210,7 +210,7 @@ func (p *ClientPicker) handleWatchEvents(events []*clientv3.Event) {
 	for _, event := range events {
 		addr := string(event.Kv.Value)
 		if event.Type == clientv3.EventTypeDelete {
-			addr = string(event.PrevKv.Value)
+			addr = string(event.PrevKv.Value)///删除节点时，获取前一个版本节点地址
 		}
 		if addr == "" {
 			continue
