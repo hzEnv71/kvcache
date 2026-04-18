@@ -65,7 +65,7 @@
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│                    用户 / client                      │
+│                    用户 / client                       │
 └───────────────────────────┬────────────────────────────┘
                             │
                             ▼
@@ -118,21 +118,21 @@
 ## 4. 目录导读（建议阅读顺序）
 
 1. `byteview.go`
-   - 先理解缓存值为什么要封装成只读视图
+  - 先理解缓存值为什么要封装成只读视图
 2. `cache.go`
-   - 看本地缓存壳层如何调用 store
+  - 看本地缓存壳层如何调用 store
 3. `store/store.go` + `store/lru.go`
-   - 理解标准 LRU
+  - 理解标准 LRU
 4. `singleflight/singleflight.go`
-   - 理解并发合并
+  - 理解并发合并
 5. `consistenthash/con_hash.go`
-   - 理解 key 如何路由到 owner
+  - 理解 key 如何路由到 owner
 6. `peers.go`
-   - 理解节点发现、ring、client 管理
+  - 理解节点发现、ring、client 管理
 7. `group.go`
-   - 核心业务入口
+  - 核心业务入口
 8. `client.go` / `server.go` / `registry/register.go`
-   - 理解分布式怎么落地
+  - 理解分布式怎么落地
 
 ---
 
@@ -215,13 +215,13 @@ group.go:Get
 1. 检查 group 是否关闭
 2. 检查 key 是否为空
 3. 如果没启用 peers：
-   - 先查本地缓存
-   - miss 后走 `load`
+  - 先查本地缓存
+  - miss 后走 `load`
 4. 如果启用了 peers：
-   - `PickPeer(key)` 找 owner
-   - owner 是远端：直接远程读
-   - owner 是本机：先查本地缓存
-   - 本机 miss 后走 `load`
+  - `PickPeer(key)` 找 owner
+  - owner 是远端：直接远程读
+  - owner 是本机：先查本地缓存
+  - 本机 miss 后走 `load`
 5. `load` 内部使用 `singleflight` 合并并发 miss
 6. `loadData` 只走本地 `getter.Get(ctx, key)` 回源
 7. 拿到结果后写回本地缓存

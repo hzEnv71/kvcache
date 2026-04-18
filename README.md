@@ -100,6 +100,10 @@ go run ./cmd/client --op get --addr 127.0.0.1:8003 --group test --key k3  --time
 go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k1 --timeout 20s
 go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k2 --timeout 20s
 go run ./cmd/client --op delete --addr 127.0.0.1:8003 --group test --key k3 --timeout 20s
+# 压测
+go run ./cmd/bench --op get --addr 127.0.0.1:8001 --group test -c 64 -n 10000 -keys 1000
+go run ./cmd/bench --op set --addr 127.0.0.1:8001 --group test -c 64 -n 10000 -keys 1000
+go run ./cmd/bench --op mixed --addr 127.0.0.1:8001 --group test -c 64 -n 10000 -keys 1000 -set-pct 20 -delete-pct 10
 
 ```
 
