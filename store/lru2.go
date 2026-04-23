@@ -42,7 +42,7 @@ func newLRU2Cache(opts Options) *lru2Store {
 		opts.CleanupInterval = time.Minute
 	}
 
-	mask := maskOfNextPowOf2(opts.BucketCount)
+	mask := maskOfNextPowOf2(opts.BucketCount) //计算桶数量
 	s := &lru2Store{
 		locks:       make([]sync.Mutex, mask+1),
 		caches:      make([][2]*cache, mask+1),
@@ -77,13 +77,12 @@ func (s *lru2Store) Get(key string) (Value, bool) {
 	currentTime := Now()
 
 	// 一级：首次访问区（命中后提升到二级）
-	n1, status1, expireAt := s.caches[idx][0].del(key)
+	n1, status1, expireAt := s.caches[idx][0].del(key) //删除一级缓存
 	if status1 > 0 {
-		if expireAt > 0 && currentTime >= expireAt {
+		if expireAt > 0 && currentTime >= expireAt {//过期删除
 			s.delete(key, idx)
 			return nil, false
 		}
-
 		s.caches[idx][1].put(key, n1.v, expireAt, s.onEvicted)
 		return n1.v, true
 	}
@@ -91,14 +90,25 @@ func (s *lru2Store) Get(key string) (Value, bool) {
 	// 二级：稳定热点区
 	n2, status2 := s._get(key, idx, 1)
 	if status2 > 0 && n2 != nil {
-		if n2.expireAt > 0 && currentTime >= n2.expireAt {
+		if n2.expireAt > 0 && currentTime >= n2.expireAt {//过期删除
 			s.delete(key, idx)
 			return nil, false
 		}
 		return n2.v, true
 	}
-
 	return nil, false
+}
+
+func (s *lru2Store) _get(key string, idx, level int32) (*node, int) {
+	if n, st := s.caches[idx][level].get(key); st > 0 && n != nil {
+		currentTime := Now()
+		if n.expireAt <= 0 || currentTime >= n.expireAt {
+			// 过期或已删除
+			return nil, 0
+		}
+		return n, st
+	}
+	return nil, 0
 }
 
 func (s *lru2Store) Set(key string, value Value) error {
@@ -131,6 +141,25 @@ func (s *lru2Store) Delete(key string) bool {
 	defer s.locks[idx].Unlock()
 
 	return s.delete(key, idx)
+}
+func (s *lru2Store) delete(key string, idx int32) bool {
+	n1, s1, _ := s.caches[idx][0].del(key)
+	n2, s2, _ := s.caches[idx][1].del(key)
+	deleted := s1 > 0 || s2 > 0//标记逻辑删除
+	//删除回调
+	if deleted && s.onEvicted != nil {
+		if n1 != nil && n1.v != nil {
+			s.onEvicted(key, n1.v)
+		} else if n2 != nil && n2.v != nil {
+			s.onEvicted(key, n2.v)
+		}
+	}
+
+	if deleted {
+		//s.expirations.Delete(key)
+	}
+
+	return deleted
 }
 
 // Clear 实现Store接口
@@ -185,6 +214,48 @@ func (s *lru2Store) Len() int {
 	}
 
 	return count
+}
+
+// cleanupLoop 定期清理各 bucket 的过期 key。
+//
+// 为避免遍历中直接修改结构导致复杂度上升，
+// 先收集过期 key，再批量 delete。
+func (s *lru2Store) cleanupLoop() {
+	for range s.cleanupTick.C {
+		currentTime := Now()
+
+		for i := range s.caches {
+			s.locks[i].Lock()
+
+			var expiredKeys []string
+
+			s.caches[i][0].walk(func(key string, value Value, expireAt int64) bool { //遍历一级缓存
+				if expireAt > 0 && currentTime >= expireAt {
+					expiredKeys = append(expiredKeys, key)
+				}
+				return true
+			})
+
+			s.caches[i][1].walk(func(key string, value Value, expireAt int64) bool { //遍历二级缓存
+				if expireAt > 0 && currentTime >= expireAt {
+					for _, k := range expiredKeys {
+						if key == k {
+							// 避免重复
+							return true
+						}
+					}
+					expiredKeys = append(expiredKeys, key)
+				}
+				return true
+			})
+
+			for _, key := range expiredKeys {
+				s.delete(key, int32(i)) //删除过期key
+			}
+
+			s.locks[i].Unlock()
+		}
+	}
 }
 
 // Close 关闭缓存相关资源
@@ -302,19 +373,19 @@ func (c *cache) put(key string, val Value, expireAt int64, onEvicted func(string
 // 从缓存中获取键对应的节点和状态
 func (c *cache) get(key string) (*node, int) {
 	if idx, ok := c.hmap[key]; ok {
-		c.adjust(idx, p, n)
+		c.adjust(idx, p, n) //刷新到链表头部
 		return &c.m[idx-1], 1
 	}
 	return nil, 0
 }
 
-// 从缓存中删除键对应的项
+// 从缓存中删除键对应的项 逻辑删除
 func (c *cache) del(key string) (*node, int, int64) {
 	if idx, ok := c.hmap[key]; ok && c.m[idx-1].expireAt > 0 {
 		e := c.m[idx-1].expireAt
-		c.m[idx-1].expireAt = 0 // 标记为已删除
-		c.adjust(idx, n, p)     // 移动到链表尾部
-		return &c.m[idx-1], 1, e
+		c.m[idx-1].expireAt = 0  // 标记为已删除
+		c.adjust(idx, n, p)      // 移动到链表尾部
+		return &c.m[idx-1], 1, e //返回节点，状态，过期时间
 	}
 
 	return nil, 0, 0
@@ -330,7 +401,7 @@ func (c *cache) walk(walker func(key string, value Value, expireAt int64) bool) 
 }
 
 // 调整节点在链表中的位置
-// 当 f=0, t=1 时，移动到链表头部；否则移动到链表尾部
+// 将节点从当前链表位置摘除，并重新插入到 t 所指向的一端
 func (c *cache) adjust(idx, f, t uint16) {
 	if c.dlnk[idx][f] != 0 {
 		c.dlnk[c.dlnk[idx][t]][f] = c.dlnk[idx][f]
@@ -339,80 +410,5 @@ func (c *cache) adjust(idx, f, t uint16) {
 		c.dlnk[idx][t] = c.dlnk[0][t]
 		c.dlnk[c.dlnk[0][t]][f] = idx
 		c.dlnk[0][t] = idx
-	}
-}
-
-func (s *lru2Store) _get(key string, idx, level int32) (*node, int) {
-	if n, st := s.caches[idx][level].get(key); st > 0 && n != nil {
-		currentTime := Now()
-		if n.expireAt <= 0 || currentTime >= n.expireAt {
-			// 过期或已删除
-			return nil, 0
-		}
-		return n, st
-	}
-
-	return nil, 0
-}
-
-func (s *lru2Store) delete(key string, idx int32) bool {
-	n1, s1, _ := s.caches[idx][0].del(key)
-	n2, s2, _ := s.caches[idx][1].del(key)
-	deleted := s1 > 0 || s2 > 0
-
-	if deleted && s.onEvicted != nil {
-		if n1 != nil && n1.v != nil {
-			s.onEvicted(key, n1.v)
-		} else if n2 != nil && n2.v != nil {
-			s.onEvicted(key, n2.v)
-		}
-	}
-
-	if deleted {
-		//s.expirations.Delete(key)
-	}
-
-	return deleted
-}
-
-// cleanupLoop 定期清理各 bucket 的过期 key。
-//
-// 为避免遍历中直接修改结构导致复杂度上升，
-// 先收集过期 key，再批量 delete。
-func (s *lru2Store) cleanupLoop() {
-	for range s.cleanupTick.C {
-		currentTime := Now()
-
-		for i := range s.caches {
-			s.locks[i].Lock()
-
-			var expiredKeys []string
-
-			s.caches[i][0].walk(func(key string, value Value, expireAt int64) bool {
-				if expireAt > 0 && currentTime >= expireAt {
-					expiredKeys = append(expiredKeys, key)
-				}
-				return true
-			})
-
-			s.caches[i][1].walk(func(key string, value Value, expireAt int64) bool {
-				if expireAt > 0 && currentTime >= expireAt {
-					for _, k := range expiredKeys {
-						if key == k {
-							// 避免重复
-							return true
-						}
-					}
-					expiredKeys = append(expiredKeys, key)
-				}
-				return true
-			})
-
-			for _, key := range expiredKeys {
-				s.delete(key, int32(i))
-			}
-
-			s.locks[i].Unlock()
-		}
 	}
 }

@@ -348,6 +348,7 @@ func TestCacheAdjust(t *testing.T) {
 // 测试lru2Store的基本接口
 func TestLRU2StoreBasicOperations(t *testing.T) {
 	var evictedKeys []string
+	//删除回调
 	onEvicted := func(key string, value Value) {
 		evictedKeys = append(evictedKeys, fmt.Sprintf("%s:%v", key, value))
 	}

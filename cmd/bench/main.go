@@ -44,11 +44,11 @@ func main() {
 		keys[i] = fmt.Sprintf("k%d", i)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dialCancel()
 
 	conn, err := grpc.DialContext(
-		ctx,
+		dialCtx,
 		*addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
@@ -63,7 +63,9 @@ func main() {
 
 	if *warmup {
 		fmt.Println("warming up...")
-		preload(ctx, cli, *group, keys)
+		warmCtx, warmCancel := context.WithTimeout(context.Background(), time.Duration(len(keys))*(*timeout))
+		defer warmCancel()
+		preload(warmCtx, cli, *group, keys)
 	}
 
 	fmt.Printf("start bench op=%s addr=%s group=%s c=%d n=%d keys=%d\n", *op, *addr, *group, *gor, *n, *keyCount)
@@ -85,7 +87,11 @@ func main() {
 			key := keys[r.Intn(len(keys))]
 			value := fmt.Sprintf("v-%d-%d", i, r.Intn(1000000))
 			bstart := time.Now()
-			err := doOne(ctx, cli, *group, *op, key, value, *setPct, *delPct, r)
+
+			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), *timeout)
+			defer rpcCancel()
+
+			err := doOne(rpcCtx, cli, *group, *op, key, value, *setPct, *delPct, r)
 			results <- result{dur: time.Since(bstart), err: err}
 			atomic.AddInt64(&sent, 1)
 		}(i)
