@@ -77,9 +77,9 @@ func (s *lru2Store) Get(key string) (Value, bool) {
 	currentTime := Now()
 
 	// 一级：首次访问区（命中后提升到二级）
-	n1, status1, expireAt := s.caches[idx][0].del(key) //删除一级缓存
+	n1, status1, expireAt := s.caches[idx][0].del(key) //删除一级缓存 逻辑删除
 	if status1 > 0 {
-		if expireAt > 0 && currentTime >= expireAt {//过期删除
+		if expireAt > 0 && currentTime >= expireAt { //过期删除
 			s.delete(key, idx)
 			return nil, false
 		}
@@ -90,7 +90,7 @@ func (s *lru2Store) Get(key string) (Value, bool) {
 	// 二级：稳定热点区
 	n2, status2 := s._get(key, idx, 1)
 	if status2 > 0 && n2 != nil {
-		if n2.expireAt > 0 && currentTime >= n2.expireAt {//过期删除
+		if n2.expireAt > 0 && currentTime >= n2.expireAt { //过期删除
 			s.delete(key, idx)
 			return nil, false
 		}
@@ -145,7 +145,7 @@ func (s *lru2Store) Delete(key string) bool {
 func (s *lru2Store) delete(key string, idx int32) bool {
 	n1, s1, _ := s.caches[idx][0].del(key)
 	n2, s2, _ := s.caches[idx][1].del(key)
-	deleted := s1 > 0 || s2 > 0//标记逻辑删除
+	deleted := s1 > 0 || s2 > 0 //标记逻辑删除
 	//删除回调
 	if deleted && s.onEvicted != nil {
 		if n1 != nil && n1.v != nil {
