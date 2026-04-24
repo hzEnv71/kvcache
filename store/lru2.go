@@ -83,6 +83,9 @@ func (s *lru2Store) Get(key string) (Value, bool) {
 			s.delete(key, idx)
 			return nil, false
 		}
+		if s.onEvicted != nil && n1 != nil && n1.v != nil {
+			s.onEvicted(key, n1.v) //删除回调
+		}
 		s.caches[idx][1].put(key, n1.v, expireAt, s.onEvicted)
 		return n1.v, true
 	}
@@ -250,7 +253,7 @@ func (s *lru2Store) cleanupLoop() {
 			})
 
 			for _, key := range expiredKeys {
-				s.delete(key, int32(i)) //删除过期key
+				s.delete(key, int32(i)) //删除过期key在特定的桶
 			}
 
 			s.locks[i].Unlock()
